@@ -206,7 +206,7 @@ function useUserGroups(user) {
     const q = query(collectionGroup(fbDb, "members"), where("uid", "==", user.uid));
     const unsub = onSnapshot(q, snap => {
       setMemberships(snap.docs.map(d => ({ groupId: d.ref.parent.parent.id, role: d.data().role })));
-    }, () => setMemberships([]));
+    }, e => { console.error("[useUserGroups] Fehler beim Laden der Mitgliedschaften:", e); setMemberships([]); });
     return unsub;
   }, [user]);
   return memberships;
@@ -389,7 +389,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.12.1";
+const APP_VERSION = "3.12.2";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
