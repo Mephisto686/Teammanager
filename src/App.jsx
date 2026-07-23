@@ -389,7 +389,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.12.2";
+const APP_VERSION = "3.12.3";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -5134,6 +5134,7 @@ function GroupOnboarding({user, onLogout, toast}) {
           <div style={{fontSize:40}}>⚽</div>
           <div style={{fontWeight:900,fontSize:20,color:C.text,marginTop:4}}>Willkommen, {user.displayName||user.email}!</div>
           <div style={{fontSize:13,color:C.muted,marginTop:4}}>Du bist noch in keinem Team.</div>
+          <div style={{fontSize:10,color:"#cbd5e1",marginTop:8,wordBreak:"break-all",fontFamily:"monospace"}}>Debug UID: {user.uid}</div>
         </div>
         {children}
         <button onClick={onLogout} style={{marginTop:18,width:"100%",padding:"8px",borderRadius:10,border:"none",background:"transparent",color:C.muted,cursor:"pointer",fontFamily:"inherit",fontSize:12}}>Abmelden</button>
