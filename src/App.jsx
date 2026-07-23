@@ -388,7 +388,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.11.0";
+const APP_VERSION = "3.12.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4373,7 +4373,100 @@ function UserNameEditor({u,isSelf,setUserName}) {
   </div>);
 }
 
-function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch,onImport,toast,apiKey,onSaveApiKey,customCats,onSaveCustomCats,firebaseUser,onLogout,onFullBackup,role,allUsers,setUserRole,setUserName,deleteUser,prefs={},onPrefChange,onlineUsers}) {
+// ── TEAM-VERWALTUNG (pro Gruppe) ───────────────────────────────────
+function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast, firebaseUser}) {
+  const canManage = role==="admin"; // effektive Rolle berücksichtigt globalen Admin schon
+  const [members,setMembers]=useState([]);
+  const [inviteCode,setInviteCode]=useState(null);
+  const [copied,setCopied]=useState(false);
+
+  useEffect(()=>{
+    if(!fbDb||!groupId) return;
+    const unsub=onSnapshot(collection(fbDb,"groups",groupId,"members"),snap=>{
+      setMembers(snap.docs.map(d=>d.data()).sort((a,b)=>(a.name||"").localeCompare(b.name||"")));
+    },()=>{});
+    return unsub;
+  },[groupId]);
+  useEffect(()=>{
+    if(!fbDb||!groupId||!canManage){ setInviteCode(null); return; }
+    const unsub=onSnapshot(doc(fbDb,"groups",groupId,"settings","invite"),snap=>{
+      setInviteCode(snap.exists()?snap.data().code:null);
+    },()=>{});
+    return unsub;
+  },[groupId,canManage]);
+  const joinRequests=useJoinRequests(groupId, canManage);
+
+  const copyCode=()=>{
+    if(!inviteCode) return;
+    navigator.clipboard?.writeText(inviteCode).then(()=>{ setCopied(true); setTimeout(()=>setCopied(false),1500); });
+  };
+
+  return(<div style={{marginBottom:28}}>
+    <h2 style={{fontSize:16,fontWeight:800,color:C.text,marginBottom:14,paddingBottom:8,borderBottom:`2px solid ${C.accentL}`}}>👥 Team-Verwaltung</h2>
+
+    {memberships&&memberships.length>1&&<div style={{marginBottom:16}}>
+      <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>Aktives Team wechseln</div>
+      <select value={groupId||""} onChange={e=>onSwitchGroup(e.target.value)}
+        style={{width:"100%",padding:"9px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit"}}>
+        {memberships.map(m=><option key={m.groupId} value={m.groupId}>{m.groupId}</option>)}
+      </select>
+    </div>}
+
+    {!canManage&&<div style={{fontSize:13,color:C.muted}}>Nur der Team-Admin kann Mitglieder, Einladungscode und Beitrittswünsche verwalten.</div>}
+
+    {canManage&&<>
+      {inviteCode&&<div style={{marginBottom:16,padding:"14px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`}}>
+        <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>🔑 Einladungscode</div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <div style={{flex:1,padding:"9px 12px",borderRadius:8,background:"#f8fafc",border:`1.5px solid ${C.border}`,fontSize:18,fontWeight:800,letterSpacing:3,textAlign:"center",color:C.primary}}>{inviteCode}</div>
+          <button onClick={copyCode} style={{padding:"9px 14px",borderRadius:8,border:"none",background:copied?"#22c55e":C.primary,color:"white",fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>{copied?"Kopiert ✓":"Kopieren"}</button>
+        </div>
+        <div style={{fontSize:11,color:C.muted,marginTop:8}}>Wer diesen Code eingibt, tritt sofort als „Eltern" bei.</div>
+      </div>}
+
+      {joinRequests.length>0&&<div style={{marginBottom:16}}>
+        <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>⏳ Offene Beitrittswünsche ({joinRequests.length})</div>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {joinRequests.map(r=><div key={r.uid} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:10,background:C.card,border:`1.5px solid ${C.border}`}}>
+            {r.photo?<img src={r.photo} width={32} height={32} style={{borderRadius:"50%",flexShrink:0}}/>:<div style={{width:32,height:32,borderRadius:"50%",background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,color:C.primary,flexShrink:0}}>{(r.name||"?")[0].toUpperCase()}</div>}
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:700,fontSize:13,color:C.text}}>{r.name||r.email}</div>
+              <div style={{fontSize:11,color:C.muted}}>{r.email}</div>
+            </div>
+            <button onClick={()=>approveJoinRequest(groupId,r.uid,"eltern")} style={{padding:"6px 10px",borderRadius:8,border:"none",background:"#22c55e",color:"white",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✓ Annehmen</button>
+            <button onClick={()=>rejectJoinRequest(groupId,r.uid)} style={{padding:"6px 10px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",color:"#ef4444",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✕</button>
+          </div>)}
+        </div>
+      </div>}
+
+      <div>
+        <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>Team-Mitglieder ({members.length})</div>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {members.map(m=>{
+            const r=USER_ROLES[m.role||"eltern"]||USER_ROLES.eltern;
+            const isSelf=m.uid===firebaseUser?.uid;
+            return(<div key={m.uid} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:10,background:C.card,border:`1.5px solid ${C.border}`}}>
+              {m.photo?<img src={m.photo} width={32} height={32} style={{borderRadius:"50%",flexShrink:0}}/>:<div style={{width:32,height:32,borderRadius:"50%",background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,color:C.primary,flexShrink:0}}>{(m.name||"?")[0].toUpperCase()}</div>}
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:700,fontSize:13,color:C.text}}>{m.name||m.email}{isSelf&&<span style={{fontSize:11,color:C.muted}}> (du)</span>}</div>
+              </div>
+              <select value={m.role||"eltern"} disabled={isSelf}
+                onChange={e=>setDoc(doc(fbDb,"groups",groupId,"members",m.uid),{role:e.target.value},{merge:true})}
+                style={{padding:"5px 10px",borderRadius:8,border:`1.5px solid ${r.color}`,background:r.bg,color:r.color,fontWeight:700,fontSize:12,cursor:isSelf?"default":"pointer",fontFamily:"inherit",outline:"none"}}>
+                <option value="admin">👑 Admin</option>
+                <option value="trainer">🧑‍🏫 Trainer</option>
+                <option value="eltern">👪 Eltern</option>
+              </select>
+              {!isSelf&&<button title="Aus Team entfernen" onClick={()=>{if(window.confirm(`${m.name||m.email} aus dem Team entfernen?`))deleteDoc(doc(fbDb,"groups",groupId,"members",m.uid));}} style={{padding:"5px 8px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",cursor:"pointer",color:"#ef4444",fontSize:12,flexShrink:0}}>🗑</button>}
+            </div>);
+          })}
+        </div>
+      </div>
+    </>}
+  </div>);
+}
+
+function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch,onImport,toast,apiKey,onSaveApiKey,customCats,onSaveCustomCats,firebaseUser,onLogout,onFullBackup,role,isGlobalAdmin,allUsers,setUserRole,setUserName,deleteUser,prefs={},onPrefChange,onlineUsers,currentGroupId,memberships,onSwitchGroup}) {
   const ref=useRef();const [mode,setMode]=useState("merge");const [ki,setKi]=useState(apiKey||"");const [kv,setKv]=useState(false);
   const doImport=async e=>{ const f=e.target.files?.[0];if(!f)return;try{if(f.name.endsWith(".csv")){const p=parseCsvPlayers(await readText(f));onImport({players:p},mode==="replace"?"replace_players":"merge_players");toast(`${p.length} Spieler importiert`);}else{const d=JSON.parse(await readText(f));
     const t=d.type||"unknown";
@@ -4389,10 +4482,11 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
   const Sec=({title,ch})=><div style={{marginBottom:28}}><h2 style={{fontSize:16,fontWeight:800,color:C.text,marginBottom:14,paddingBottom:8,borderBottom:`2px solid ${C.accentL}`}}>{title}</h2>{ch}</div>;
   return(<div>
     <PageHeader title="Einstellungen" sub={`G-Jugend Coach · v${APP_VERSION}`} onlineUsers={onlineUsers} currentUser={firebaseUser}/>
+    <GroupManagementPanel groupId={currentGroupId} role={role} memberships={memberships} onSwitchGroup={onSwitchGroup} toast={toast} firebaseUser={firebaseUser}/>
     {/* Simplified settings for trainer/eltern */}
     {(role==="trainer"||role==="eltern")&&<SimpleSettings role={role} apiKey={apiKey} onSaveApiKey={onSaveApiKey} prefs={prefs} onPrefChange={onPrefChange} firebaseUser={firebaseUser} onLogout={onLogout}/>}
-    {/* Full settings for admin only */}
-    {role==="admin"&&(()=>{
+    {/* Full settings for TRUE global admin only (technischer Betreiber) */}
+    {isGlobalAdmin&&(()=>{
       const [stab,setStab]=useState("general");
       const stb=(k,l)=><button onClick={()=>setStab(k)} style={{padding:"7px 16px",borderRadius:7,border:"none",cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"inherit",background:stab===k?C.primary:"transparent",color:stab===k?"white":C.muted}}>{l}</button>;
       return(<div>
@@ -4983,23 +5077,157 @@ function BackupBanner({lastExportAt,onBackup}) {
   </div>);
 }
 
+// ── ONBOARDING: Team anlegen oder beitreten ────────────────────────
+function GroupOnboarding({user, onLogout, toast}) {
+  const [mode,setMode]=useState(null); // null | "create" | "join"
+  const [joinTab,setJoinTab]=useState("code"); // "code" | "browse"
+  const [name,setName]=useState("");
+  const [code,setCode]=useState("");
+  const [selectedGroupId,setSelectedGroupId]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [requestedGroupId,setRequestedGroupId]=useState(()=>localStorage.getItem("pendingJoinRequest")||null);
+  const allGroups=useAllGroups(user);
+
+  // Prüfen, ob der eigene Beitrittswunsch noch offen ist (live)
+  useEffect(()=>{
+    if(!fbDb||!user||!requestedGroupId) return;
+    const unsub=onSnapshot(doc(fbDb,"groups",requestedGroupId,"joinRequests",user.uid), snap=>{
+      if(!snap.exists()){ setRequestedGroupId(null); localStorage.removeItem("pendingJoinRequest"); }
+    },()=>{});
+    return unsub;
+  },[user,requestedGroupId]);
+
+  const doCreate=async()=>{
+    if(!name.trim()) return;
+    setBusy(true);
+    const r=await createGroup(user,name.trim());
+    setBusy(false);
+    if(r.ok) toast(`Team "${name.trim()}" angelegt ✓`);
+    else toast("Fehler beim Anlegen: "+r.error,"err");
+  };
+  const doJoinCode=async()=>{
+    if(!code.trim()) return;
+    setBusy(true);
+    const r=await joinGroupByCode(user,code.trim());
+    setBusy(false);
+    if(r.ok) toast("Team beigetreten ✓");
+    else toast(r.error==="invalid-code"?"Code ungültig":"Fehler: "+r.error,"err");
+  };
+  const doRequestJoin=async()=>{
+    if(!selectedGroupId) return;
+    setBusy(true);
+    const r=await requestToJoinGroup(user,selectedGroupId);
+    setBusy(false);
+    if(r.ok){ setRequestedGroupId(selectedGroupId); localStorage.setItem("pendingJoinRequest",selectedGroupId); toast("Beitrittswunsch gesendet ✓"); }
+    else toast("Fehler: "+r.error,"err");
+  };
+  const cancelRequest=async()=>{
+    await cancelJoinRequest(user,requestedGroupId);
+    setRequestedGroupId(null); localStorage.removeItem("pendingJoinRequest");
+  };
+
+  const Shell=({children})=>(
+    <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg,padding:24}}>
+      <div style={{width:"100%",maxWidth:420,background:C.card,borderRadius:16,border:`1.5px solid ${C.border}`,padding:28,boxShadow:"0 8px 30px rgba(0,0,0,.08)"}}>
+        <div style={{textAlign:"center",marginBottom:20}}>
+          <div style={{fontSize:40}}>⚽</div>
+          <div style={{fontWeight:900,fontSize:20,color:C.text,marginTop:4}}>Willkommen, {user.displayName||user.email}!</div>
+          <div style={{fontSize:13,color:C.muted,marginTop:4}}>Du bist noch in keinem Team.</div>
+        </div>
+        {children}
+        <button onClick={onLogout} style={{marginTop:18,width:"100%",padding:"8px",borderRadius:10,border:"none",background:"transparent",color:C.muted,cursor:"pointer",fontFamily:"inherit",fontSize:12}}>Abmelden</button>
+      </div>
+    </div>
+  );
+
+  if(requestedGroupId){
+    const g=allGroups.find(g=>g.id===requestedGroupId);
+    return <Shell>
+      <div style={{textAlign:"center",padding:"20px 0"}}>
+        <div style={{fontSize:40}}>⏳</div>
+        <div style={{fontWeight:800,fontSize:16,color:C.text,marginTop:8}}>Beitrittswunsch gesendet</div>
+        <div style={{fontSize:13,color:C.muted,marginTop:6}}>Der Admin von {g?.name||"diesem Team"} muss deinen Beitritt noch bestätigen.</div>
+        <button onClick={cancelRequest} style={{marginTop:16,padding:"8px 16px",borderRadius:10,border:`1.5px solid ${C.border}`,background:"white",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:13}}>Zurückziehen</button>
+      </div>
+    </Shell>;
+  }
+
+  if(mode===null) return <Shell>
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      <button onClick={()=>setMode("create")} style={{padding:"14px",borderRadius:12,border:"none",background:C.primary,color:"white",fontWeight:800,fontSize:15,cursor:"pointer",fontFamily:"inherit"}}>➕ Neues Team anlegen</button>
+      <button onClick={()=>setMode("join")} style={{padding:"14px",borderRadius:12,border:`1.5px solid ${C.border}`,background:"white",color:C.text,fontWeight:800,fontSize:15,cursor:"pointer",fontFamily:"inherit"}}>🔗 Team beitreten</button>
+    </div>
+  </Shell>;
+
+  if(mode==="create") return <Shell>
+    <button onClick={()=>setMode(null)} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:13,padding:0,marginBottom:14,fontFamily:"inherit"}}>← Zurück</button>
+    <div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:8}}>Name deines Teams</div>
+    <input value={name} onChange={e=>setName(e.target.value)} placeholder="z.B. SC Sternschanze G-Jugend 2019"
+      style={{width:"100%",padding:"10px 14px",border:`1.5px solid ${C.border}`,borderRadius:10,fontSize:14,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit"}}/>
+    <button onClick={doCreate} disabled={busy||!name.trim()} style={{marginTop:14,width:"100%",padding:"12px",borderRadius:10,border:"none",background:busy||!name.trim()?"#94a3b8":C.primary,color:"white",fontWeight:800,fontSize:14,cursor:busy||!name.trim()?"default":"pointer",fontFamily:"inherit"}}>{busy?"Wird angelegt...":"Team anlegen"}</button>
+    <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>Du wirst automatisch Admin dieses Teams. Ein Einladungscode wird erzeugt.</div>
+  </Shell>;
+
+  // mode==="join"
+  return <Shell>
+    <button onClick={()=>setMode(null)} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:13,padding:0,marginBottom:14,fontFamily:"inherit"}}>← Zurück</button>
+    <div style={{display:"flex",gap:4,background:"#f1f5f9",borderRadius:10,padding:4,marginBottom:16}}>
+      <button onClick={()=>setJoinTab("code")} style={{flex:1,padding:"7px",borderRadius:7,border:"none",cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"inherit",background:joinTab==="code"?C.primary:"transparent",color:joinTab==="code"?"white":C.muted}}>Code eingeben</button>
+      <button onClick={()=>setJoinTab("browse")} style={{flex:1,padding:"7px",borderRadius:7,border:"none",cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"inherit",background:joinTab==="browse"?C.primary:"transparent",color:joinTab==="browse"?"white":C.muted}}>Team wählen</button>
+    </div>
+    {joinTab==="code"?<div>
+      <input value={code} onChange={e=>setCode(e.target.value.toUpperCase())} placeholder="z.B. AB12CD" maxLength={8}
+        style={{width:"100%",padding:"10px 14px",border:`1.5px solid ${C.border}`,borderRadius:10,fontSize:16,letterSpacing:2,textAlign:"center",color:C.text,background:C.bg,outline:"none",fontFamily:"inherit",textTransform:"uppercase"}}/>
+      <button onClick={doJoinCode} disabled={busy||!code.trim()} style={{marginTop:14,width:"100%",padding:"12px",borderRadius:10,border:"none",background:busy||!code.trim()?"#94a3b8":C.primary,color:"white",fontWeight:800,fontSize:14,cursor:busy||!code.trim()?"default":"pointer",fontFamily:"inherit"}}>{busy?"Prüfe...":"Beitreten"}</button>
+      <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>Den Code bekommst du von deinem Trainer. Sofortiger Beitritt als „Eltern".</div>
+    </div>:<div>
+      {allGroups.length===0?<div style={{fontSize:13,color:C.muted,textAlign:"center",padding:"10px 0"}}>Noch keine Teams vorhanden.</div>:<>
+        <select value={selectedGroupId} onChange={e=>setSelectedGroupId(e.target.value)}
+          style={{width:"100%",padding:"10px 14px",border:`1.5px solid ${C.border}`,borderRadius:10,fontSize:14,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit"}}>
+          <option value="">— Team wählen —</option>
+          {allGroups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
+        </select>
+        <button onClick={doRequestJoin} disabled={busy||!selectedGroupId} style={{marginTop:14,width:"100%",padding:"12px",borderRadius:10,border:"none",background:busy||!selectedGroupId?"#94a3b8":C.primary,color:"white",fontWeight:800,fontSize:14,cursor:busy||!selectedGroupId?"default":"pointer",fontFamily:"inherit"}}>{busy?"Sende...":"Beitritt anfragen"}</button>
+        <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>Der Admin dieses Teams muss deinen Beitritt bestätigen.</div>
+      </>}
+    </div>}
+  </Shell>;
+}
+
 export default function App() {
   const [page,setPage]=useState(()=>sessionStorage.getItem("gjPage")||"library");
   const [darkMode,setDarkMode]=useState(()=>{try{const _prefs=JSON.parse(localStorage.getItem("personal_guest")||"{}");return _prefs.darkMode||false;}catch{return false;}});
   useEffect(()=>sessionStorage.setItem("gjPage",page),[page]);
   const [pendingSetup,setPendingSetup]=useState(null);
   const { user, login, loginEmail, registerEmail, resetPassword, logout, onlineUsers } = useFirebaseAuth();
-  const { role, allUsers, setUserRole, setUserName, deleteUser, pendingCount } = useRole(user);
+  const { role: globalRole, allUsers, setUserRole, setUserName, deleteUser, pendingCount } = useRole(user);
+  const isGlobalAdmin = globalRole==="admin";
   // Einmalige, idempotente Gruppen-Migration (legt Gruppe an + kopiert shared/*-Daten, falls noch nicht geschehen)
   useEffect(()=>{ if(user) ensureGroupMigrated(user); },[user]);
-  const [prefs, setPrefs] = usePersonalSettings(user?.uid);
-  const prevPendingRef = React.useRef(pendingCount);
+  // Gruppen, in denen der Nutzer Mitglied ist + aktuell ausgewählte Gruppe
+  const memberships = useUserGroups(user);
+  const [currentGroupId, setCurrentGroupIdRaw] = useState(()=>localStorage.getItem("currentGroupId")||null);
+  const setCurrentGroupId = (gid) => { setCurrentGroupIdRaw(gid); if(gid) localStorage.setItem("currentGroupId",gid); else localStorage.removeItem("currentGroupId"); };
   useEffect(()=>{
-    if(role==="admin"&&pendingCount>prevPendingRef.current){
-      toast(`👤 Neuer Nutzer wartet auf Freischaltung!`,"warn");
+    if(!memberships) return; // lädt noch
+    const stillValid = currentGroupId && memberships.some(m=>m.groupId===currentGroupId);
+    if(!stillValid && memberships.length>0) setCurrentGroupId(memberships[0].groupId);
+    if(!stillValid && memberships.length===0) setCurrentGroupId(null);
+  },[memberships]);
+  const currentMembership = memberships?.find(m=>m.groupId===currentGroupId);
+  // Effektive Rolle für Tab-/Aktions-Berechtigungen: globaler Admin ist überall admin,
+  // sonst zählt die Rolle innerhalb der aktuell aktiven Gruppe.
+  const role = isGlobalAdmin ? "admin" : (currentMembership?.role || null);
+  const [prefs, setPrefs] = usePersonalSettings(user?.uid);
+  // Offene Beitrittswünsche der aktuellen Gruppe (nur relevant für den Gruppen-Admin)
+  const groupJoinRequests = useJoinRequests(currentGroupId, role==="admin");
+  const prevJoinReqRef = React.useRef(groupJoinRequests.length);
+  useEffect(()=>{
+    if(role==="admin"&&groupJoinRequests.length>prevJoinReqRef.current){
+      toast(`👤 Neuer Beitrittswunsch für dein Team!`,"warn");
     }
-    prevPendingRef.current=pendingCount;
-  },[pendingCount,role]);
+    prevJoinReqRef.current=groupJoinRequests.length;
+  },[groupJoinRequests.length,role]);
   const toggleDark = (val) => { setPrefs({darkMode:val}); setDarkMode(val); applyTheme(val); };
   // Apply default page from prefs
   useEffect(()=>{ if(prefs.defaultPage&&!sessionStorage.getItem("gjPage")) setPage(prefs.defaultPage); },[prefs.defaultPage]);
@@ -5014,14 +5242,14 @@ export default function App() {
       }
     }
   },[role,page]);
-  const [exercises,  setExercises,  er]=useCloudStorage("exercises",  [], user);
-  const [players,    setPlayers,    pr]=useCloudStorage("players",    [], user);
-  const [coaches,    setCoaches,    cr]=useCloudStorage("coaches",    [], user);
-  const [sessions,   setSessions,   sr]=useCloudStorage("sessions",   [], user);
-  const [tournaments,setTournaments,tr]=useCloudStorage("tournaments",[], user);
-  const [kassenbuch, setKassenbuch, kr]=useCloudStorage("kassenbuch", [], user);
-  const [todos,      setTodos,      tor]=useCloudStorage("todos",      [], user);
-  const [meetings,   setMeetings,   mr]=useCloudStorage("meetings",   [], user);
+  const [exercises,  setExercises,  er]=useCloudStorage("exercises",  [], user, currentGroupId);
+  const [players,    setPlayers,    pr]=useCloudStorage("players",    [], user, currentGroupId);
+  const [coaches,    setCoaches,    cr]=useCloudStorage("coaches",    [], user, currentGroupId);
+  const [sessions,   setSessions,   sr]=useCloudStorage("sessions",   [], user, currentGroupId);
+  const [tournaments,setTournaments,tr]=useCloudStorage("tournaments",[], user, currentGroupId);
+  const [kassenbuch, setKassenbuch, kr]=useCloudStorage("kassenbuch", [], user, currentGroupId);
+  const [todos,      setTodos,      tor]=useCloudStorage("todos",      [], user, currentGroupId);
+  const [meetings,   setMeetings,   mr]=useCloudStorage("meetings",   [], user, currentGroupId);
   const [apiKey,     setApiKey,     ar]=useStorage("apiKey",     "");
   const [lastExportAt,setLastExportAt]=useStorage("lastExportAt","");
   const [customCats, setCustomCats    ]=useCloudStorage("customCats", [], user);
@@ -5086,28 +5314,17 @@ export default function App() {
   };
   // Auth still loading
   if(user===undefined||!er||!pr||!cr||!sr||!tr||!kr||!tor||!mr||!ar) return <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg}}><div style={{textAlign:"center",color:C.muted}}><div style={{fontSize:40,marginBottom:12}}>⚽</div><div style={{fontWeight:700}}>Lade...</div></div></div>;
-  // Role still loading
-  if(user&&role===null) return <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg}}><div style={{textAlign:"center",color:C.muted}}><div style={{fontSize:40,marginBottom:12}}>⏳</div><div style={{fontWeight:700}}>Lade Berechtigungen...</div><div style={{fontSize:12,marginTop:8}}>Falls dies länger dauert, bitte neu laden</div></div></div>;
-  // Pending - waiting for admin approval
-  if(user&&role==="banned") return(<div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg,flexDirection:"column",gap:16,padding:24}}>
-    <div style={{fontSize:56}}>🚫</div>
-    <div style={{fontWeight:900,fontSize:22,color:C.text}}>Zugriff gesperrt</div>
-    <div style={{color:C.muted,fontSize:14,textAlign:"center",maxWidth:280}}>Dein Zugriff wurde von einem Admin entzogen.</div>
-    <button onClick={logout} style={{padding:"8px 20px",borderRadius:10,border:`1px solid ${C.border}`,background:"white",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:14}}>Abmelden</button>
-  </div>);
-  if(user&&role==="pending") return(<div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg,flexDirection:"column",gap:16,padding:24}}>
-    <div style={{fontSize:56}}>⏳</div>
-    <div style={{fontWeight:900,fontSize:22,color:C.text}}>Zugriff ausstehend</div>
-    <div style={{color:C.muted,fontSize:14,textAlign:"center",maxWidth:280}}>Dein Konto wurde registriert. Ein Admin muss dir erst Zugriff gewähren.</div>
-    <div style={{padding:"10px 16px",borderRadius:10,background:"#f8fafc",border:`1px solid ${C.border}`,fontSize:13,color:C.muted}}>Angemeldet als: {user.displayName||user.email}</div>
-    <button onClick={logout} style={{padding:"8px 20px",borderRadius:10,border:`1px solid ${C.border}`,background:"white",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:14}}>Abmelden</button>
-  </div>);
   // Not logged in - show login screen
   if(!user) return <AuthScreen onGoogle={login} onEmail={loginEmail} onRegister={registerEmail} onReset={resetPassword}/>;
+  // Globale Rolle / Gruppen-Mitgliedschaften laden
+  if(globalRole===null||memberships===null) return <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg}}><div style={{textAlign:"center",color:C.muted}}><div style={{fontSize:40,marginBottom:12}}>⏳</div><div style={{fontWeight:700}}>Lade Berechtigungen...</div><div style={{fontSize:12,marginTop:8}}>Falls dies länger dauert, bitte neu laden</div></div></div>;
+  // In keiner Gruppe? → Onboarding (Team anlegen oder beitreten). Jeder eingeloggte Nutzer landet hier,
+  // niemand wird mehr global blockiert.
+  if(memberships.length===0||!currentGroupId) return <GroupOnboarding user={user} onLogout={logout} toast={toast}/>;
   return(<div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:C.bg,minHeight:"100vh"}}>
     <style>{`*{box-sizing:border-box}body{margin:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}`}</style>
     <Toasts/>
-    <Nav page={page} setPage={setPage} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?pendingCount:0}}/>
+    <Nav page={page} setPage={setPage} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0}}/>
     <main className="gm" style={{display:"block"}}>
       {page==="library"  &&<LibraryPage  exercises={exercises} onSave={saveEx} onDelete={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} apiKey={apiKey} toast={toast} onlineUsers={onlineUsers} currentUser={user}/>}
       {page==="team"     &&<TeamPage     players={players} coaches={coaches} sessions={sessions} onSaveSession={saveSe} onSavePlayer={can(role,"editAnything")?savePl:null} onDeletePlayer={can(role,"editAnything")?id=>{const i=players.find(p=>p.id===id);setPlayers(prev=>prev.filter(p=>p.id!==id));showUndo("Spieler",i,()=>setPlayers(prev=>[i,...prev]));}:null} onSaveCoach={can(role,"editAnything")?saveCo:null} onDeleteCoach={can(role,"editAnything")?id=>{const i=coaches.find(c=>c.id===id);setCoaches(prev=>prev.filter(c=>c.id!==id));showUndo("Trainer",i,()=>setCoaches(prev=>[i,...prev]));}:null} toast={toast} showStrength={can(role,"seeStrength")} readOnly={!can(role,"editAnything")} onAddToTraining={can(role,"editAnything")?({playerIds,coachIds,kids,coachCount})=>{setPendingSetup({playerIds,coachIds,kids:kids||playerIds.length,coachCount:coachCount||1,date:todayISO(),location:"outdoor",focus:""});setPage("training");}:null} onlineUsers={onlineUsers} currentUser={user}/>}
@@ -5116,7 +5333,7 @@ export default function App() {
       {page==="training" &&<TrainingPage sessions={sessions} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} apiKey={apiKey} toast={toast} onSaveExercise={saveEx} pendingSetup={pendingSetup} onClearPendingSetup={()=>setPendingSetup(null)} onlineUsers={onlineUsers} currentUser={user}/>}
       {page==="turnier"  &&<TurnierPage  tournaments={tournaments} onSaveTournament={saveTo} onDeleteTournament={id=>{const i=tournaments.find(t=>t.id===id);setTournaments(prev=>prev.filter(t=>t.id!==id));showUndo("Turnier",i,()=>setTournaments(prev=>[i,...prev]));}} coaches={coaches} onlineUsers={onlineUsers} currentUser={user} toast={toast}/>}
       {page==="kasse"    &&can(role,"kasse")&&<KassePage kassenbuch={kassenbuch} onSave={can(role,"editKasse")?saveKa:null} onDelete={can(role,"editKasse")?id=>{const i=kassenbuch.find(k=>k.id===id);setKassenbuch(prev=>prev.filter(k=>k.id!==id));showUndo("Eintrag",i,()=>setKassenbuch(prev=>[i,...prev]));}:null} readOnly={!can(role,"editKasse")} toast={toast} onlineUsers={onlineUsers} currentUser={user}/>}
-      {(can(role,"settings")||role==="trainer"||role==="eltern")&&page==="settings"&&<SettingsPage exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onlineUsers={onlineUsers}/>}
+      {(can(role,"settings")||role==="trainer"||role==="eltern")&&page==="settings"&&<SettingsPage exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={setCurrentGroupId}/>}
     </main>
     {undoBuf&&<div style={{position:"fixed",bottom:76,left:12,right:12,zIndex:9999,display:"flex",alignItems:"center",gap:10,background:"#1e293b",color:"white",borderRadius:12,padding:"12px 16px",boxShadow:"0 4px 24px rgba(0,0,0,.35)"}}>
       <span style={{fontSize:13,fontWeight:600,flex:1}}>{undoBuf.label}</span>
