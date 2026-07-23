@@ -12,12 +12,12 @@ db.version(2).stores({ kv: 'key', teamsets: '++id,date' });
 
 // ── FIREBASE ──────────────────────────────────────────────────────
 const FB_CONFIG = {
-  apiKey: "AIzaSyDFmUwPai3I2725Skik3hoWOWPw4I0-JTY",
-  authDomain: "scs-jugend-coach.firebaseapp.com",
-  projectId: "scs-jugend-coach",
-  storageBucket: "scs-jugend-coach.firebasestorage.app",
-  messagingSenderId: "968145102711",
-  appId: "1:968145102711:web:3d2bb4fc6c070655696372"
+  apiKey: "AIzaSyDsC6ATr4_9F4GJxxgZ7NrEQy2QQobCnIY",
+  authDomain: "teammanager-football.firebaseapp.com",
+  projectId: "teammanager-football",
+  storageBucket: "teammanager-football.firebasestorage.app",
+  messagingSenderId: "418794589338",
+  appId: "1:418794589338:web:8e919240086fabb5b9e323"
 };
 let fbApp, fbAuth, fbDb;
 try {
