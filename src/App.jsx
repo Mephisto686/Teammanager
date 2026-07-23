@@ -85,6 +85,7 @@ async function ensureGroupMigrated(user) {
     for(const d of rolesSnap.docs) {
       const data = d.data();
       await setDoc(doc(fbDb,"groups",DEFAULT_GROUP_ID,"members",d.id),{
+        uid: d.id,
         role: data.role||"pending",
         name: data.name||"",
         email: data.email||"",
@@ -388,7 +389,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.12.0";
+const APP_VERSION = "3.12.1";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
