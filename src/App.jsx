@@ -27,6 +27,7 @@ try {
 } catch(e) { console.error("Firebase init failed:", e); }
 
 // Read a shared collection document (stored as one doc per collection for simplicity)
+// LEGACY (pre-Gruppen) — wird nur noch von der Migration gelesen, nicht mehr live genutzt
 async function fbRead(col) {
   if(!fbDb) return null;
   try {
@@ -39,6 +40,60 @@ async function fbWrite(col, items) {
   try {
     await setDoc(doc(fbDb,"shared",col),{items, updatedAt: new Date().toISOString()});
   } catch(e) { console.warn("fbWrite",col,e); }
+}
+
+// ── GRUPPEN ───────────────────────────────────────────────────────
+// Erste Gruppe (fest vergebene, lesbare ID statt zufällig — vereinfacht die Migration).
+// Später, sobald die UI zum Anlegen weiterer Gruppen steht, kommen dynamische IDs dazu.
+const DEFAULT_GROUP_ID = "sternschanze-g2019";
+
+async function fbReadGroup(groupId, col) {
+  if(!fbDb) return null;
+  try {
+    const snap = await getDoc(doc(fbDb,"groups",groupId,"shared",col));
+    return snap.exists() ? snap.data().items : null;
+  } catch(e) { console.warn("fbReadGroup",col,e); return null; }
+}
+async function fbWriteGroup(groupId, col, items) {
+  if(!fbDb) return;
+  try {
+    await setDoc(doc(fbDb,"groups",groupId,"shared",col),{items, updatedAt: new Date().toISOString()});
+  } catch(e) { console.warn("fbWriteGroup",col,e); }
+}
+
+// Einmalige Migration: legt die erste Gruppe an, kopiert bestehende shared/*-Daten
+// hinein und spiegelt die bisherigen globalen Rollen als Gruppen-Mitgliedschaften.
+// Idempotent: bricht sofort ab, falls die Gruppe schon existiert.
+const SHARED_COLLECTIONS = ["exercises","players","coaches","sessions","tournaments","kassenbuch","todos","meetings","customCats","teamsets"];
+async function ensureGroupMigrated(user) {
+  if(!fbDb || !user) return;
+  try {
+    const groupRef = doc(fbDb,"groups",DEFAULT_GROUP_ID);
+    const groupSnap = await getDoc(groupRef);
+    if(groupSnap.exists()) return; // bereits migriert
+    await setDoc(groupRef,{
+      name: "SC Sternschanze G-Jugend 2019",
+      createdAt: new Date().toISOString(),
+      createdBy: user.uid,
+      migratedFromShared: true
+    });
+    for(const col of SHARED_COLLECTIONS) {
+      const items = await fbRead(col);
+      if(items!==null) await fbWriteGroup(DEFAULT_GROUP_ID, col, items);
+    }
+    const rolesSnap = await getDocs(collection(fbDb,"roles"));
+    for(const d of rolesSnap.docs) {
+      const data = d.data();
+      await setDoc(doc(fbDb,"groups",DEFAULT_GROUP_ID,"members",d.id),{
+        role: data.role||"pending",
+        name: data.name||"",
+        email: data.email||"",
+        photo: data.photo||null,
+        joinedAt: data.createdAt||new Date().toISOString()
+      });
+    }
+    console.info("[Gruppen-Migration] abgeschlossen:", DEFAULT_GROUP_ID);
+  } catch(e) { console.warn("[Gruppen-Migration] fehlgeschlagen", e); }
 }
 // ── ROLE SYSTEM ───────────────────────────────────────────────────
 // Roles: "admin" | "trainer" | "eltern" | "pending"
@@ -205,7 +260,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.9.6";
+const APP_VERSION = "3.10.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4609,7 +4664,7 @@ function useFirebaseAuth() {
 // ── FIREBASE SYNC HOOK ────────────────────────────────────────────
 // Syncs a named collection to/from Firestore in real-time.
 // Falls back to local Dexie when offline or not logged in.
-function useCloudStorage(key, def, user) {
+function useCloudStorage(key, def, user, groupId=DEFAULT_GROUP_ID) {
   const [data, setData]   = useState(def);
   const [ready, setReady] = useState(false);
   const localKey = "cloud_" + key;
@@ -4622,11 +4677,11 @@ function useCloudStorage(key, def, user) {
     }).catch(() => setReady(true));
   }, [localKey]);
 
-  // Subscribe to Firestore when logged in
+  // Subscribe to Firestore when logged in — jetzt unter groups/{groupId}/shared/{key}
   useEffect(() => {
-    if (!user) return;
+    if (!user || !groupId) return;
     if(!fbDb) return;
-    const unsub = onSnapshot(doc(fbDb, "shared", key), snap => {
+    const unsub = onSnapshot(doc(fbDb, "groups", groupId, "shared", key), snap => {
       if (snap.exists()) {
         const items = snap.data().items;
         setData(items);
@@ -4634,7 +4689,7 @@ function useCloudStorage(key, def, user) {
       }
     }, e => console.warn("onSnapshot", key, e));
     return unsub;
-  }, [user, key, localKey]);
+  }, [user, groupId, key, localKey]);
 
   const save = useCallback((nextOrFn) => {
     setData(prev => {
@@ -4642,10 +4697,10 @@ function useCloudStorage(key, def, user) {
       // Write locally
       db.kv.put({ key: localKey, value: JSON.stringify(next) }).catch(() => {});
       // Write to cloud if logged in
-      if (user) fbWrite(key, next);
+      if (user && groupId) fbWriteGroup(groupId, key, next);
       return next;
     });
-  }, [user, key, localKey]);
+  }, [user, groupId, key, localKey]);
 
   return [data, save, ready];
 }
@@ -4807,6 +4862,8 @@ export default function App() {
   const [pendingSetup,setPendingSetup]=useState(null);
   const { user, login, loginEmail, registerEmail, resetPassword, logout, onlineUsers } = useFirebaseAuth();
   const { role, allUsers, setUserRole, setUserName, deleteUser, pendingCount } = useRole(user);
+  // Einmalige, idempotente Gruppen-Migration (legt Gruppe an + kopiert shared/*-Daten, falls noch nicht geschehen)
+  useEffect(()=>{ if(user) ensureGroupMigrated(user); },[user]);
   const [prefs, setPrefs] = usePersonalSettings(user?.uid);
   const prevPendingRef = React.useRef(pendingCount);
   useEffect(()=>{
