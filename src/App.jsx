@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import Dexie from "dexie";
 import { initializeApp } from "firebase/app";
 import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile, sendPasswordResetEmail } from "firebase/auth";
-import { getFirestore, doc, getDoc, setDoc, onSnapshot, deleteDoc, collection, collectionGroup, addDoc, query, where, orderBy, limit, getDocs, serverTimestamp } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc, onSnapshot, deleteDoc, collection, addDoc, query, orderBy, limit, getDocs, serverTimestamp } from "firebase/firestore";
 import { BookOpen, Users, CalendarDays, Settings, Plus, Search, Edit2, Trash2, Download, Upload, Shuffle, Filter, Clock, Trophy, Bot, RefreshCw, CheckSquare, Square, Dices, ListChecks, Wallet, Phone, MapPin, AlertTriangle, ShieldCheck, ClipboardList, MoreHorizontal, Star } from "lucide-react";
 
 // ── DEXIE DB ──────────────────────────────────────────────────────
@@ -199,16 +199,39 @@ function useAllGroups(user) {
 }
 
 // Gruppen, in denen der aktuelle Nutzer Mitglied ist (Live)
+// Bewusst OHNE collectionGroup-Abfrage: stattdessen alle Gruppen auflisten (schon erlaubt)
+// und pro Gruppe einen einfachen, gezielten Dokument-Zugriff auf den eigenen Mitgliedschafts-Eintrag machen.
+// Das ist bei wenigen Gruppen genauso schnell, aber deutlich weniger fehleranfällig bzgl. Security Rules.
 function useUserGroups(user) {
   const [memberships, setMemberships] = useState(null); // null = lädt noch
+  const [allGroupIds, setAllGroupIds] = useState(null);
+
   useEffect(() => {
-    if (!fbDb || !user) { setMemberships(user === null ? null : []); return; }
-    const q = query(collectionGroup(fbDb, "members"), where("uid", "==", user.uid));
-    const unsub = onSnapshot(q, snap => {
-      setMemberships(snap.docs.map(d => ({ groupId: d.ref.parent.parent.id, role: d.data().role })));
-    }, e => { console.error("[useUserGroups] Fehler beim Laden der Mitgliedschaften:", e); setMemberships([]); });
+    if (!fbDb || !user) { setAllGroupIds(null); setMemberships(user === null ? null : []); return; }
+    const unsub = onSnapshot(collection(fbDb, "groups"), snap => {
+      setAllGroupIds(snap.docs.map(d => d.id));
+    }, e => { console.error("[useUserGroups] Fehler beim Laden der Gruppenliste:", e); setAllGroupIds([]); });
     return unsub;
   }, [user]);
+
+  useEffect(() => {
+    if (!fbDb || !user || !allGroupIds) return;
+    let cancelled = false;
+    (async () => {
+      const results = [];
+      for (const gid of allGroupIds) {
+        try {
+          const snap = await getDoc(doc(fbDb, "groups", gid, "members", user.uid));
+          if (snap.exists()) results.push({ groupId: gid, role: snap.data().role });
+        } catch (e) {
+          // kein Zugriff = keine Mitgliedschaft in dieser Gruppe, einfach überspringen
+        }
+      }
+      if (!cancelled) setMemberships(results);
+    })();
+    return () => { cancelled = true; };
+  }, [user, allGroupIds ? allGroupIds.join(",") : null]);
+
   return memberships;
 }
 
@@ -389,7 +412,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.12.3";
+const APP_VERSION = "3.13.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -5134,7 +5157,6 @@ function GroupOnboarding({user, onLogout, toast}) {
           <div style={{fontSize:40}}>⚽</div>
           <div style={{fontWeight:900,fontSize:20,color:C.text,marginTop:4}}>Willkommen, {user.displayName||user.email}!</div>
           <div style={{fontSize:13,color:C.muted,marginTop:4}}>Du bist noch in keinem Team.</div>
-          <div style={{fontSize:10,color:"#cbd5e1",marginTop:8,wordBreak:"break-all",fontFamily:"monospace"}}>Debug UID: {user.uid}</div>
         </div>
         {children}
         <button onClick={onLogout} style={{marginTop:18,width:"100%",padding:"8px",borderRadius:10,border:"none",background:"transparent",color:C.muted,cursor:"pointer",fontFamily:"inherit",fontSize:12}}>Abmelden</button>
