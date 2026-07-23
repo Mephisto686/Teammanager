@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import Dexie from "dexie";
 import { initializeApp } from "firebase/app";
 import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile, sendPasswordResetEmail } from "firebase/auth";
-import { getFirestore, doc, getDoc, setDoc, onSnapshot, deleteDoc, collection, addDoc, query, orderBy, limit, getDocs, serverTimestamp } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc, onSnapshot, deleteDoc, collection, collectionGroup, addDoc, query, where, orderBy, limit, getDocs, serverTimestamp } from "firebase/firestore";
 import { BookOpen, Users, CalendarDays, Settings, Plus, Search, Edit2, Trash2, Download, Upload, Shuffle, Filter, Clock, Trophy, Bot, RefreshCw, CheckSquare, Square, Dices, ListChecks, Wallet, Phone, MapPin, AlertTriangle, ShieldCheck, ClipboardList, MoreHorizontal, Star } from "lucide-react";
 
 // ── DEXIE DB ──────────────────────────────────────────────────────
@@ -94,6 +94,134 @@ async function ensureGroupMigrated(user) {
     }
     console.info("[Gruppen-Migration] abgeschlossen:", DEFAULT_GROUP_ID);
   } catch(e) { console.warn("[Gruppen-Migration] fehlgeschlagen", e); }
+}
+
+// ── GRUPPEN-VERWALTUNG (Erstellen / Beitreten / Anfragen) ──────────
+function genInviteCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // ohne verwechselbare Zeichen (0/O, 1/I)
+  let code = "";
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+function slugifyGroupName(name) {
+  return (name || "team").toLowerCase()
+    .replace(/[äöüß]/g, c => ({ ä: "ae", ö: "oe", ü: "ue", ß: "ss" }[c]))
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "")
+    .slice(0, 40) || "team";
+}
+
+// Neue Gruppe anlegen, Ersteller wird automatisch admin dieser Gruppe, Einladungscode wird generiert
+async function createGroup(user, name) {
+  if (!fbDb || !user || !name?.trim()) return { ok: false, error: "invalid" };
+  try {
+    const base = slugifyGroupName(name);
+    let groupId = base;
+    for (let i = 0; i < 20; i++) {
+      const snap = await getDoc(doc(fbDb, "groups", groupId));
+      if (!snap.exists()) break;
+      groupId = `${base}-${Math.floor(Math.random() * 1000)}`;
+    }
+    const code = genInviteCode();
+    await setDoc(doc(fbDb, "groups", groupId), {
+      name: name.trim(), createdAt: new Date().toISOString(), createdBy: user.uid
+    });
+    await setDoc(doc(fbDb, "groups", groupId, "settings", "invite"), { code });
+    await setDoc(doc(fbDb, "inviteCodes", code), { groupId });
+    await setDoc(doc(fbDb, "groups", groupId, "members", user.uid), {
+      uid: user.uid, role: "admin", name: user.displayName || "", email: user.email || "",
+      photo: user.photoURL || null, joinedAt: new Date().toISOString()
+    });
+    return { ok: true, groupId };
+  } catch (e) { return { ok: false, error: e.code || "unknown" }; }
+}
+
+// Sofortiger Beitritt per Einladungscode — landet immer als Rolle "eltern"
+// (Admin kann danach in der Nutzerverwaltung hochstufen)
+async function joinGroupByCode(user, code) {
+  if (!fbDb || !user || !code?.trim()) return { ok: false, error: "invalid" };
+  try {
+    const codeSnap = await getDoc(doc(fbDb, "inviteCodes", code.trim().toUpperCase()));
+    if (!codeSnap.exists()) return { ok: false, error: "invalid-code" };
+    const groupId = codeSnap.data().groupId;
+    await setDoc(doc(fbDb, "groups", groupId, "members", user.uid), {
+      uid: user.uid, role: "eltern", name: user.displayName || "", email: user.email || "",
+      photo: user.photoURL || null, joinedAt: new Date().toISOString()
+    });
+    return { ok: true, groupId };
+  } catch (e) { return { ok: false, error: e.code || "unknown" }; }
+}
+
+// Beitrittswunsch ohne Code — Admin der Zielgruppe muss aktiv bestätigen
+async function requestToJoinGroup(user, groupId) {
+  if (!fbDb || !user) return { ok: false, error: "invalid" };
+  try {
+    await setDoc(doc(fbDb, "groups", groupId, "joinRequests", user.uid), {
+      uid: user.uid, name: user.displayName || "", email: user.email || "",
+      photo: user.photoURL || null, requestedAt: new Date().toISOString()
+    });
+    return { ok: true };
+  } catch (e) { return { ok: false, error: e.code || "unknown" }; }
+}
+async function cancelJoinRequest(user, groupId) {
+  if (!fbDb || !user) return;
+  try { await deleteDoc(doc(fbDb, "groups", groupId, "joinRequests", user.uid)); } catch (e) {}
+}
+async function approveJoinRequest(groupId, uid, role = "eltern") {
+  if (!fbDb) return;
+  try {
+    const reqSnap = await getDoc(doc(fbDb, "groups", groupId, "joinRequests", uid));
+    const data = reqSnap.exists() ? reqSnap.data() : {};
+    await setDoc(doc(fbDb, "groups", groupId, "members", uid), {
+      uid, role, name: data.name || "", email: data.email || "", photo: data.photo || null,
+      joinedAt: new Date().toISOString()
+    });
+    await deleteDoc(doc(fbDb, "groups", groupId, "joinRequests", uid));
+  } catch (e) { console.warn("approveJoinRequest", e); }
+}
+async function rejectJoinRequest(groupId, uid) {
+  if (!fbDb) return;
+  try { await deleteDoc(doc(fbDb, "groups", groupId, "joinRequests", uid)); } catch (e) {}
+}
+
+// Offenes Verzeichnis aller Gruppen (fürs Dropdown "Team beitreten")
+function useAllGroups(user) {
+  const [groups, setGroups] = useState([]);
+  useEffect(() => {
+    if (!fbDb || !user) return;
+    const unsub = onSnapshot(collection(fbDb, "groups"), snap => {
+      setGroups(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.name || "").localeCompare(b.name || "")));
+    }, () => {});
+    return unsub;
+  }, [user]);
+  return groups;
+}
+
+// Gruppen, in denen der aktuelle Nutzer Mitglied ist (Live)
+function useUserGroups(user) {
+  const [memberships, setMemberships] = useState(null); // null = lädt noch
+  useEffect(() => {
+    if (!fbDb || !user) { setMemberships(user === null ? null : []); return; }
+    const q = query(collectionGroup(fbDb, "members"), where("uid", "==", user.uid));
+    const unsub = onSnapshot(q, snap => {
+      setMemberships(snap.docs.map(d => ({ groupId: d.ref.parent.parent.id, role: d.data().role })));
+    }, () => setMemberships([]));
+    return unsub;
+  }, [user]);
+  return memberships;
+}
+
+// Offene Beitrittswünsche einer Gruppe (für Admin/Trainer-Ansicht)
+function useJoinRequests(groupId, canSee) {
+  const [requests, setRequests] = useState([]);
+  useEffect(() => {
+    if (!fbDb || !groupId || !canSee) { setRequests([]); return; }
+    const unsub = onSnapshot(collection(fbDb, "groups", groupId, "joinRequests"), snap => {
+      setRequests(snap.docs.map(d => d.data()));
+    }, () => {});
+    return unsub;
+  }, [groupId, canSee]);
+  return requests;
 }
 // ── ROLE SYSTEM ───────────────────────────────────────────────────
 // Roles: "admin" | "trainer" | "eltern" | "pending"
@@ -260,7 +388,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.10.1";
+const APP_VERSION = "3.11.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
