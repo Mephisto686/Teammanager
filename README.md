@@ -1,4 +1,4 @@
-# ⚽ G-Jugend Coach
+# ⚽ Jugend Coach
 
 Trainings-App für G-Jugend (U7) Fußball-Trainer. PWA – funktioniert auch offline und kann auf dem Smartphone installiert werden.
 
