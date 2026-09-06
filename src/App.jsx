@@ -1364,9 +1364,10 @@ function ExDetail({exercise:ex,onEdit,onSave,onDelete,onClose}) {
 }
 
 // ── LIBRARY PAGE ──────────────────────────────────────────────────
-function LibraryPage({exercises,onSave,onDelete,apiKey,toast,onlineUsers,currentUser}) {
+function LibraryPage({exercises,onSave,onDelete,apiKey,toast,onlineUsers,currentUser,initialCategory,onConsumeInitialCategory}) {
   const [search,setSearch]=useState("");
-  const [fCat,setFCat]=useState("");
+  const [fCat,setFCat]=useState(initialCategory||"");
+  useEffect(()=>{ if(initialCategory){ setFCat(initialCategory); onConsumeInitialCategory?.(); } },[initialCategory]);
   const [fTag,setFTag]=useState("");
   const [fRat,setFRat]=useState(0);
   const [showF,setShowF]=useState(false);
@@ -4771,7 +4772,8 @@ function StatBox({icon,value,label}) {
   </div>);
 }
 
-function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets,kassenbuch,exercises,role,currentUser,onlineUsers,onNavigate}) {
+function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets,kassenbuch,exercises,role,currentUser,onlineUsers,onNavigate,onOpenLibraryCategory,onSaveExercise,onDeleteExercise}) {
+  const [exModal,setExModal]=useState(null);
   const today=todayISO();
   const activePlayers=(players||[]).filter(p=>p.active);
   const nextSession=[...(sessions||[])].filter(s=>s.date>=today&&!s.isDraft).sort((a,b)=>a.date.localeCompare(b.date))[0];
@@ -4799,6 +4801,13 @@ function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets
     can(role,"orga")&&{icon:"📋",title:"Orga",sub:openTodos.length?`${openTodos.length} offen`:"Alles erledigt",badge:openTodos.length||null,onClick:()=>onNavigate("orga")},
     can(role,"kasse")&&{icon:"💰",title:"Kasse",sub:`${balance>=0?"+":""}${balance.toFixed(2)} €`,onClick:()=>onNavigate("kasse")},
   ].filter(Boolean);
+
+  const exByCat=key=>exercises.filter(e=>normCat(e.category)===key);
+  const catRows=can(role,"library")?[
+    {key:"aufwaermen",label:"Aufwärmen"},
+    {key:"uebung",     label:"Übungen"},
+    {key:"spielform",  label:"Spielformen"},
+  ]:[];
 
   return(<div>
     <div style={{marginBottom:18}}>
@@ -4833,11 +4842,46 @@ function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets
       </div>
     </div>}
 
+    {catRows.map(({key,label})=><StartCatRow key={key} label={label} catInfo={BUILTIN_CATS[key]} exs={exByCat(key)} onSeeAll={()=>onOpenLibraryCategory(key)} onOpenEx={ex=>setExModal(ex)}/>)}
+
     <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(84px,1fr))",gap:10}}>
       <StatBox icon="👦" value={activePlayers.length} label="Spieler aktiv"/>
       <StatBox icon="📚" value={(exercises||[]).length} label="Übungen"/>
       <StatBox icon="📅" value={(sessions||[]).length} label="Trainings"/>
       <StatBox icon="🏆" value={(tournaments||[]).length} label="Turniere"/>
+    </div>
+
+    {exModal&&<Modal title={exModal.title} onClose={()=>setExModal(null)} wide>
+      <ExDetail exercise={exModal}
+        onEdit={()=>{setExModal(null);onNavigate("library");}}
+        onSave={x=>{onSaveExercise?.(x);setExModal(m=>m?{...m,...x}:m);}}
+        onDelete={id=>{onDeleteExercise?.(id);setExModal(null);}}
+        onClose={()=>setExModal(null)}/>
+    </Modal>}
+  </div>);
+}
+
+function ExerciseMiniCard({ex,catInfo,onClick}) {
+  return(<div onClick={onClick} style={{flex:"0 0 auto",width:130,background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,overflow:"hidden",cursor:"pointer"}}>
+    {ex.imageUrl
+      ? <img src={ex.imageUrl} alt="" style={{width:"100%",height:78,objectFit:"cover",display:"block"}}/>
+      : <div style={{width:"100%",height:78,background:catInfo.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:26}}>{catInfo.emoji}</div>}
+    <div style={{padding:"8px 10px"}}>
+      <div style={{fontWeight:700,fontSize:12,color:C.text,lineHeight:1.25,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden",minHeight:"2.4em"}}>{ex.title}</div>
+      <div style={{fontSize:10,color:C.muted,marginTop:3}}>⏱ {ex.duration} Min{ex.rating>0?` · ${"★".repeat(ex.rating)}`:""}</div>
+    </div>
+  </div>);
+}
+
+function StartCatRow({label,catInfo,exs,onSeeAll,onOpenEx}) {
+  if(!exs.length) return null;
+  return(<div style={{marginBottom:24}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:10}}>
+      <div style={{fontWeight:800,fontSize:15,color:C.text}}>{catInfo.emoji} {label}</div>
+      <button onClick={onSeeAll} style={{background:"none",border:"none",color:C.primary,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>Alle anzeigen →</button>
+    </div>
+    <div className="tm-hscroll" style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:2}}>
+      {exs.slice(0,12).map(ex=><ExerciseMiniCard key={ex.id} ex={ex} catInfo={catInfo} onClick={()=>onOpenEx(ex)}/>)}
     </div>
   </div>);
 }
@@ -5337,6 +5381,7 @@ export default function App() {
   const [darkMode,setDarkMode]=useState(()=>{try{const _prefs=JSON.parse(localStorage.getItem("personal_guest")||"{}");return _prefs.darkMode||false;}catch{return false;}});
   useEffect(()=>sessionStorage.setItem("gjPage",page),[page]);
   const [pendingSetup,setPendingSetup]=useState(null);
+  const [pendingLibraryCat,setPendingLibraryCat]=useState(null);
   const { user, login, loginEmail, registerEmail, resetPassword, logout, onlineUsers } = useFirebaseAuth();
   const { role: globalRole, allUsers, setUserRole, setUserName, deleteUser, pendingCount } = useRole(user);
   const isGlobalAdmin = globalRole==="admin";
@@ -5464,8 +5509,8 @@ export default function App() {
     <Toasts/>
     <Nav page={page} setPage={setPage} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0}}/>
     <main className="gm" style={{display:"block"}}>
-      {page==="start"    &&<StartPage players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} todos={todos} meetings={meetings} teamsets={teamsets} kassenbuch={kassenbuch} exercises={exercises} role={role} currentUser={user} onlineUsers={onlineUsers} onNavigate={setPage}/>}
-      {page==="library"  &&<LibraryPage  exercises={exercises} onSave={saveEx} onDelete={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} apiKey={apiKey} toast={toast} onlineUsers={onlineUsers} currentUser={user}/>}
+      {page==="start"    &&<StartPage players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} todos={todos} meetings={meetings} teamsets={teamsets} kassenbuch={kassenbuch} exercises={exercises} role={role} currentUser={user} onlineUsers={onlineUsers} onNavigate={setPage} onOpenLibraryCategory={cat=>{setPendingLibraryCat(cat);setPage("library");}} onSaveExercise={saveEx} onDeleteExercise={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}}/>}
+      {page==="library"  &&<LibraryPage  exercises={exercises} onSave={saveEx} onDelete={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} apiKey={apiKey} toast={toast} onlineUsers={onlineUsers} currentUser={user} initialCategory={pendingLibraryCat} onConsumeInitialCategory={()=>setPendingLibraryCat(null)}/>}
       {page==="team"     &&<TeamPage     players={players} coaches={coaches} sessions={sessions} onSaveSession={saveSe} onSavePlayer={can(role,"editAnything")?savePl:null} onDeletePlayer={can(role,"editAnything")?id=>{const i=players.find(p=>p.id===id);setPlayers(prev=>prev.filter(p=>p.id!==id));showUndo("Spieler",i,()=>setPlayers(prev=>[i,...prev]));}:null} onSaveCoach={can(role,"editAnything")?saveCo:null} onDeleteCoach={can(role,"editAnything")?id=>{const i=coaches.find(c=>c.id===id);setCoaches(prev=>prev.filter(c=>c.id!==id));showUndo("Trainer",i,()=>setCoaches(prev=>[i,...prev]));}:null} toast={toast} showStrength={can(role,"seeStrength")} readOnly={!can(role,"editAnything")} onAddToTraining={can(role,"editAnything")?({playerIds,coachIds,kids,coachCount})=>{setPendingSetup({playerIds,coachIds,kids:kids||playerIds.length,coachCount:coachCount||1,date:todayISO(),location:"outdoor",focus:""});setPage("training");}:null} onlineUsers={onlineUsers} currentUser={user}/>}
       {page==="orga"&&can(role,"orga")&&<OrgaPage todos={todos} onSaveTodo={saveTodo} onDeleteTodo={id=>{const i=todos.find(t=>t.id===id);setTodos(prev=>prev.filter(t=>t.id!==id));showUndo("Task",i,()=>setTodos(prev=>[i,...prev]));}} meetings={meetings} onSaveMeeting={saveMeeting} onDeleteMeeting={id=>{const i=meetings.find(m=>m.id===id);setMeetings(prev=>prev.filter(m=>m.id!==id));showUndo("Trainertreff",i,()=>setMeetings(prev=>[i,...prev]));}} coaches={coaches} currentUser={user} toast={toast} showUndo={showUndo} readOnly={!can(role,"editAnything")} onlineUsers={onlineUsers}/>}
       {page==="teamplaner"&&<TeamplanerPage players={players} teamsets={teamsets} onSaveTeamset={can(role,"editAnything")?saveTSets:null} onDeleteTeamset={can(role,"editAnything")?id=>{const i=teamsets.find(t=>t.id===id);setTeamsets(prev=>prev.filter(t=>t.id!==id));showUndo("Team-Aufstellung",i,()=>setTeamsets(prev=>[i,...prev]));}:null} readOnly={!can(role,"editAnything")} showStrength={can(role,"seeStrength")} toast={toast} onlineUsers={onlineUsers} currentUser={user}/>}
