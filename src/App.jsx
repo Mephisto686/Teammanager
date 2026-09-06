@@ -3,7 +3,7 @@ import Dexie from "dexie";
 import { initializeApp } from "firebase/app";
 import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile, sendPasswordResetEmail } from "firebase/auth";
 import { getFirestore, doc, getDoc, setDoc, onSnapshot, deleteDoc, collection, addDoc, query, orderBy, limit, getDocs, serverTimestamp } from "firebase/firestore";
-import { BookOpen, Users, CalendarDays, Settings, Plus, Search, Edit2, Trash2, Download, Upload, Shuffle, Filter, Clock, Trophy, Bot, RefreshCw, CheckSquare, Square, Dices, ListChecks, Wallet, Phone, MapPin, AlertTriangle, ShieldCheck, ClipboardList, MoreHorizontal, Star } from "lucide-react";
+import { Home, BookOpen, Users, CalendarDays, Settings, Plus, Search, Edit2, Trash2, Download, Upload, Shuffle, Filter, Clock, Trophy, Bot, RefreshCw, CheckSquare, Square, Dices, ListChecks, Wallet, Phone, MapPin, AlertTriangle, ShieldCheck, ClipboardList, MoreHorizontal, Star } from "lucide-react";
 
 // ── DEXIE DB ──────────────────────────────────────────────────────
 const db = new Dexie('GJugendCoachDB');
@@ -259,6 +259,7 @@ const USER_ROLES = {
 };
 const CAN = {
   // tabs visible
+  start:    ["admin","trainer","eltern"],
   library:  ["admin","trainer"],
   team:     ["admin","trainer","eltern"],
   training: ["admin","trainer","eltern"],
@@ -412,7 +413,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.13.0";
+const APP_VERSION = "3.14.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4729,11 +4730,124 @@ function BirthdayBanner({players}) {
 }
 
 
+// ── START / DASHBOARD PAGE ────────────────────────────────────────
+function relDateLabel(dateStr) {
+  if(!dateStr) return "";
+  const d=new Date(dateStr+"T12:00:00");
+  const t=new Date(); t.setHours(12,0,0,0);
+  const diffDays=Math.round((d-t)/86400000);
+  if(diffDays===0) return "Heute";
+  if(diffDays===1) return "Morgen";
+  if(diffDays<0) return d.toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit"});
+  if(diffDays<7) return d.toLocaleDateString("de-DE",{weekday:"long"});
+  return d.toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit",year:d.getFullYear()!==t.getFullYear()?"numeric":undefined});
+}
+
+function StartTeaser({icon,title,sub,badge,onClick}) {
+  return(<button onClick={onClick} style={{flex:"0 0 auto",width:130,background:C.card,borderRadius:14,border:`1.5px solid ${C.border}`,padding:"14px 12px",display:"flex",flexDirection:"column",gap:4,cursor:"pointer",textAlign:"left",fontFamily:"inherit",position:"relative"}}>
+    {badge?<span style={{position:"absolute",top:8,right:8,background:"#ef4444",color:"white",fontSize:10,fontWeight:800,borderRadius:20,padding:"1px 6px",lineHeight:1.4}}>{badge}</span>:null}
+    <span style={{fontSize:22}}>{icon}</span>
+    <span style={{fontWeight:800,fontSize:13,color:C.text,lineHeight:1.2}}>{title}</span>
+    <span style={{fontSize:11,color:C.muted,lineHeight:1.3}}>{sub}</span>
+  </button>);
+}
+
+function NextCard({icon,label,title,sub,onClick}) {
+  return(<div onClick={onClick} style={{flex:"0 0 auto",width:196,background:C.card,borderRadius:14,border:`1.5px solid ${C.border}`,padding:"14px 16px",cursor:onClick?"pointer":"default"}}>
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+      <div style={{width:32,height:32,borderRadius:9,background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>{icon}</div>
+      <div style={{fontSize:10,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6}}>{label}</div>
+    </div>
+    <div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{title}</div>
+    {sub&&<div style={{fontSize:12,color:C.muted}}>{sub}</div>}
+  </div>);
+}
+
+function StatBox({icon,value,label}) {
+  return(<div style={{background:C.card,border:`1.5px solid ${C.border}`,borderRadius:12,padding:"12px 10px",textAlign:"center"}}>
+    <div style={{fontSize:17}}>{icon}</div>
+    <div style={{fontWeight:900,fontSize:18,color:C.text,marginTop:2}}>{value}</div>
+    <div style={{fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:.4,marginTop:1}}>{label}</div>
+  </div>);
+}
+
+function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets,kassenbuch,exercises,role,currentUser,onlineUsers,onNavigate}) {
+  const today=todayISO();
+  const activePlayers=(players||[]).filter(p=>p.active);
+  const nextSession=[...(sessions||[])].filter(s=>s.date>=today&&!s.isDraft).sort((a,b)=>a.date.localeCompare(b.date))[0];
+  const nextTournament=[...(tournaments||[])].filter(t=>t.date>=today).sort((a,b)=>a.date.localeCompare(b.date))[0];
+  const nextMeeting=[...(meetings||[])].filter(m=>m.date>=today).sort((a,b)=>a.date.localeCompare(b.date))[0];
+  const openTodos=[...(todos||[])].filter(t=>!t.done).sort((a,b)=>{if(a.due&&b.due)return a.due.localeCompare(b.due);if(a.due)return -1;if(b.due)return 1;return 0;});
+  const ein=(kassenbuch||[]).filter(k=>k.type==="ein").reduce((s,k)=>s+k.amount,0);
+  const aus=(kassenbuch||[]).filter(k=>k.type==="aus").reduce((s,k)=>s+k.amount,0);
+  const balance=ein-aus;
+  const firstName=(currentUser?.displayName||currentUser?.email||"").split(/[ @]/)[0];
+  const hour=new Date().getHours();
+  const greeting=hour<11?"Guten Morgen":hour<18?"Hallo":"Guten Abend";
+
+  const nextItems=[
+    nextSession&&{icon:"📅",label:"Nächstes Training",title:relDateLabel(nextSession.date),sub:[nextSession.location,nextSession.duration?`${nextSession.duration} Min`:null].filter(Boolean).join(" · ")||undefined,onClick:()=>onNavigate("training")},
+    nextTournament&&{icon:"🏆",label:"Nächstes Turnier",title:nextTournament.name||"Turnier",sub:relDateLabel(nextTournament.date),onClick:()=>onNavigate("turnier")},
+    nextMeeting&&{icon:"🧑‍🏫",label:"Trainertreff",title:nextMeeting.title||"Trainertreff",sub:relDateLabel(nextMeeting.date),onClick:()=>onNavigate("orga")},
+  ].filter(Boolean);
+
+  const teasers=[
+    can(role,"training")&&{icon:"📅",title:"Training planen",sub:nextSession?relDateLabel(nextSession.date):"Neue Einheit",onClick:()=>onNavigate("training")},
+    {icon:"👥",title:"Team",sub:`${activePlayers.length} Spieler`,onClick:()=>onNavigate("team")},
+    can(role,"teamplaner")&&{icon:"🔀",title:"Teams losen",sub:`${(teamsets||[]).length} gespeichert`,onClick:()=>onNavigate("teamplaner")},
+    can(role,"turnier")&&{icon:"🏆",title:"Turniere",sub:`${(tournaments||[]).length} geplant`,onClick:()=>onNavigate("turnier")},
+    can(role,"orga")&&{icon:"📋",title:"Orga",sub:openTodos.length?`${openTodos.length} offen`:"Alles erledigt",badge:openTodos.length||null,onClick:()=>onNavigate("orga")},
+    can(role,"kasse")&&{icon:"💰",title:"Kasse",sub:`${balance>=0?"+":""}${balance.toFixed(2)} €`,onClick:()=>onNavigate("kasse")},
+  ].filter(Boolean);
+
+  return(<div>
+    <div style={{marginBottom:18}}>
+      <div style={{fontSize:13,color:C.muted,fontWeight:600}}>{greeting}{firstName?`, ${firstName}`:""}</div>
+      <h1 style={{margin:"2px 0 0",fontSize:24,fontWeight:900,color:C.text}}>⚽ Übersicht</h1>
+    </div>
+
+    <div className="tm-hscroll" style={{display:"flex",gap:10,overflowX:"auto",marginBottom:24,paddingBottom:2}}>
+      {teasers.map((tItem,i)=><StartTeaser key={i} {...tItem}/>)}
+    </div>
+
+    {nextItems.length>0&&<div style={{marginBottom:24}}>
+      <div style={{fontWeight:800,fontSize:15,color:C.text,marginBottom:10}}>Als Nächstes</div>
+      <div className="tm-hscroll" style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:2}}>
+        {nextItems.map((it,i)=><NextCard key={i} {...it}/>)}
+      </div>
+    </div>}
+
+    {can(role,"orga")&&openTodos.length>0&&<div style={{marginBottom:24}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:10}}>
+        <div style={{fontWeight:800,fontSize:15,color:C.text}}>Offene Aufgaben</div>
+        <button onClick={()=>onNavigate("orga")} style={{background:"none",border:"none",color:C.primary,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>Alle anzeigen →</button>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        {openTodos.slice(0,4).map(todo=>(
+          <div key={todo.id} onClick={()=>onNavigate("orga")} style={{display:"flex",alignItems:"center",gap:10,background:C.card,border:`1.5px solid ${C.border}`,borderRadius:10,padding:"10px 14px",cursor:"pointer"}}>
+            <div style={{width:8,height:8,borderRadius:"50%",background:todo.due&&todo.due<today?"#ef4444":C.accent,flexShrink:0}}/>
+            <div style={{flex:1,minWidth:0,fontSize:14,fontWeight:600,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{todo.task}</div>
+            {todo.due&&<div style={{fontSize:11,color:todo.due<today?"#ef4444":C.muted,fontWeight:700,flexShrink:0}}>{relDateLabel(todo.due)}</div>}
+          </div>
+        ))}
+      </div>
+    </div>}
+
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(84px,1fr))",gap:10}}>
+      <StatBox icon="👦" value={activePlayers.length} label="Spieler aktiv"/>
+      <StatBox icon="📚" value={(exercises||[]).length} label="Übungen"/>
+      <StatBox icon="📅" value={(sessions||[]).length} label="Trainings"/>
+      <StatBox icon="🏆" value={(tournaments||[]).length} label="Turniere"/>
+    </div>
+  </div>);
+}
+
 function Nav({page,setPage,counts}) {
   const [showMore,setShowMore]=useState(false);
   const swipeRef=useRef({});
 
   const allItems=[
+    {key:"start",    icon:Home,      label:"Start"},
     {key:"library",  icon:BookOpen,  label:"Bibliothek", count:counts.exercises},
     {key:"team",     icon:Users,     label:"Team",        count:counts.players},
     {key:"training", icon:CalendarDays,label:"Training",  count:counts.sessions},
@@ -4744,7 +4858,7 @@ function Nav({page,setPage,counts}) {
     {key:"settings", icon:Settings,  label:"Einstellungen",alert:counts.pendingCount>0},
   ];
   const visible=allItems.filter(i=>can(counts.role,i.key)||(i.key==="settings"&&(counts.role==="trainer"||counts.role==="eltern")));
-  const MAIN_KEYS=["library","training","teamplaner","orga"];
+  const MAIN_KEYS=["start","library","training","teamplaner","orga"];
   const mainItems=visible.filter(i=>MAIN_KEYS.includes(i.key));
   const moreItems=visible.filter(i=>!MAIN_KEYS.includes(i.key));
   const moreActive=moreItems.some(i=>i.key===page);
@@ -4803,7 +4917,7 @@ function Nav({page,setPage,counts}) {
   };
 
   return(<>
-    <style>{`.gn{position:fixed;left:0;top:0;bottom:0;width:200px;background:${C.nav};display:flex;flex-direction:column;z-index:100;padding:0 12px 20px}.gm{display:flex;margin-left:200px;padding:28px;max-width:1100px}.gb{display:none;position:fixed;bottom:0;left:0;right:0;background:${C.nav};z-index:100;border-top:1px solid rgba(255,255,255,.1)}@media(max-width:640px){.gn{display:none}.gb{display:flex;height:68px}.gm{margin-left:0!important;padding:16px;padding-bottom:88px}}@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    <style>{`.gn{position:fixed;left:0;top:0;bottom:0;width:200px;background:${C.nav};display:flex;flex-direction:column;z-index:100;padding:0 12px 20px}.gm{display:flex;margin-left:200px;padding:28px;max-width:1100px}.gb{display:none;position:fixed;bottom:0;left:0;right:0;background:${C.nav};z-index:100;border-top:1px solid rgba(255,255,255,.1)}@media(max-width:640px){.gn{display:none}.gb{display:flex;height:68px}.gm{margin-left:0!important;padding:16px;padding-bottom:88px}}@keyframes spin{to{transform:rotate(360deg)}}.tm-hscroll{scrollbar-width:none;-webkit-overflow-scrolling:touch}.tm-hscroll::-webkit-scrollbar{display:none}`}</style>
     {/* Desktop sidebar */}
     <div className="gn">
       <div style={{padding:"24px 8px 20px",borderBottom:"1px solid rgba(255,255,255,.1)",marginBottom:12}}>
@@ -5219,7 +5333,7 @@ function GroupOnboarding({user, onLogout, toast}) {
 }
 
 export default function App() {
-  const [page,setPage]=useState(()=>sessionStorage.getItem("gjPage")||"library");
+  const [page,setPage]=useState(()=>sessionStorage.getItem("gjPage")||"start");
   const [darkMode,setDarkMode]=useState(()=>{try{const _prefs=JSON.parse(localStorage.getItem("personal_guest")||"{}");return _prefs.darkMode||false;}catch{return false;}});
   useEffect(()=>sessionStorage.setItem("gjPage",page),[page]);
   const [pendingSetup,setPendingSetup]=useState(null);
@@ -5261,7 +5375,7 @@ export default function App() {
       // trainer and eltern have access to simplified settings
       const hasAccess=can(role,page)||(page==="settings"&&(role==="trainer"||role==="eltern"));
       if(!hasAccess){
-        const allowed=["library","team","training","teamplaner","turnier","kasse","orga","settings"].find(pg=>can(role,pg)||(pg==="settings"&&(role==="trainer"||role==="eltern")));
+        const allowed=["start","library","team","training","teamplaner","turnier","kasse","orga","settings"].find(pg=>can(role,pg)||(pg==="settings"&&(role==="trainer"||role==="eltern")));
         if(allowed) setPage(allowed);
       }
     }
@@ -5350,6 +5464,7 @@ export default function App() {
     <Toasts/>
     <Nav page={page} setPage={setPage} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0}}/>
     <main className="gm" style={{display:"block"}}>
+      {page==="start"    &&<StartPage players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} todos={todos} meetings={meetings} teamsets={teamsets} kassenbuch={kassenbuch} exercises={exercises} role={role} currentUser={user} onlineUsers={onlineUsers} onNavigate={setPage}/>}
       {page==="library"  &&<LibraryPage  exercises={exercises} onSave={saveEx} onDelete={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} apiKey={apiKey} toast={toast} onlineUsers={onlineUsers} currentUser={user}/>}
       {page==="team"     &&<TeamPage     players={players} coaches={coaches} sessions={sessions} onSaveSession={saveSe} onSavePlayer={can(role,"editAnything")?savePl:null} onDeletePlayer={can(role,"editAnything")?id=>{const i=players.find(p=>p.id===id);setPlayers(prev=>prev.filter(p=>p.id!==id));showUndo("Spieler",i,()=>setPlayers(prev=>[i,...prev]));}:null} onSaveCoach={can(role,"editAnything")?saveCo:null} onDeleteCoach={can(role,"editAnything")?id=>{const i=coaches.find(c=>c.id===id);setCoaches(prev=>prev.filter(c=>c.id!==id));showUndo("Trainer",i,()=>setCoaches(prev=>[i,...prev]));}:null} toast={toast} showStrength={can(role,"seeStrength")} readOnly={!can(role,"editAnything")} onAddToTraining={can(role,"editAnything")?({playerIds,coachIds,kids,coachCount})=>{setPendingSetup({playerIds,coachIds,kids:kids||playerIds.length,coachCount:coachCount||1,date:todayISO(),location:"outdoor",focus:""});setPage("training");}:null} onlineUsers={onlineUsers} currentUser={user}/>}
       {page==="orga"&&can(role,"orga")&&<OrgaPage todos={todos} onSaveTodo={saveTodo} onDeleteTodo={id=>{const i=todos.find(t=>t.id===id);setTodos(prev=>prev.filter(t=>t.id!==id));showUndo("Task",i,()=>setTodos(prev=>[i,...prev]));}} meetings={meetings} onSaveMeeting={saveMeeting} onDeleteMeeting={id=>{const i=meetings.find(m=>m.id===id);setMeetings(prev=>prev.filter(m=>m.id!==id));showUndo("Trainertreff",i,()=>setMeetings(prev=>[i,...prev]));}} coaches={coaches} currentUser={user} toast={toast} showUndo={showUndo} readOnly={!can(role,"editAnything")} onlineUsers={onlineUsers}/>}
