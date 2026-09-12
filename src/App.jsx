@@ -414,7 +414,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.22.0";
+const APP_VERSION = "3.22.1";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -2868,7 +2868,16 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
       </div>);
     }
     if(it.type==="treffen"){
-      return <MeetingCard key={it.id} m={it.raw} onEdit={()=>setModal({type:"meetingForm",data:it.raw})} onDel={()=>onDeleteMeeting(it.raw.id)} onSave={onSaveMeeting} readOnly={readOnly}/>;
+      const m=it.raw;
+      const agenda=normalizeAgenda(m.agenda);
+      const doneCount=agenda.filter(a=>a.done).length;
+      return(<div key={it.id} onClick={()=>setModal({type:"meetingDetail",data:m})} style={{display:"flex",alignItems:"center",gap:10,background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"12px 16px",cursor:"pointer"}}>
+        <div style={{width:40,height:40,borderRadius:10,background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>🧑‍🏫</div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontWeight:800,fontSize:14,color:C.text}}>{m.title||"Trainertreff"}</div>
+          <div style={{fontSize:12,color:C.muted,marginTop:2}}>Treffen · {fmtDate(m.date)}{m.location?` · 📍 ${m.location}`:""}{agenda.length>0?` · ${doneCount}/${agenda.length} Punkte`:""}</div>
+        </div>
+      </div>);
     }
     const t=it.raw;
     const played=(t.matches||[]).filter(m=>m.played).length,total=(t.matches||[]).length;
