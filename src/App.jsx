@@ -414,7 +414,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.18.5";
+const APP_VERSION = "3.21.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -1028,285 +1028,6 @@ category: aufwaermen|uebung|spielform`;
     <Txta label="Text einfügen" value={text} onChange={e=>setText(e.target.value)} placeholder="z.B. 'Hütchendribbeln: Jeder Spieler dribbliert durch eine Gasse aus 6 Hütchen...'" rows={8}/>
     {error&&<div style={{color:"#ef4444",fontSize:13,marginBottom:12,fontWeight:600}}>❌ {error}</div>}
     <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Btn onClick={onClose} variant="secondary">Abbrechen</Btn><Btn onClick={run} variant="ai" disabled={loading||!text.trim()}>{loading?<><RefreshCw size={14} style={{animation:"spin 1s linear infinite"}}/> Erkenne...</>:<><Bot size={14}/> Übung erkennen</>}</Btn></div>
-  </div>);
-}
-
-// ── AI TRAINING PLAN ──────────────────────────────────────────────
-function AITrainingModal({players,exercises,onClose,apiKey,onSaveEx,onSaveSession,setup,replaceId}) {
-  const MAT_OPTS=["Bälle","Hütchen","Leibchen","Minitore","Koordinationsleiter","Stangen","Reifen","Pylonen"];
-  const [cfg,setCfg]=useState({kids:setup?.kids||players.filter(p=>p.active).length||10,coaches:setup?.coachCount||1,duration:setup?.duration||60,focus:setup?.focus||"",useLib:true,location:setup?.location||"outdoor",material:[...MAT_OPTS]});
-  const [loading,setLoading]=useState(false);
-  const [plan,setPlan]=useState(null);
-  const [error,setError]=useState("");
-  const [saved,setSaved]=useState([]);
-  const [view,setView]=useState("config"); // config | plan | detail | replace
-  const [detailEx,setDetailEx]=useState(null);
-  const [replaceTarget,setReplaceTarget]=useState(null); // {phaseIdx,stationIdx,category}
-  const [hasDraft,setHasDraft]=useState(false);
-  const set=(k,v)=>setCfg(c=>({...c,[k]:v}));
-  const togMat=m=>set("material",cfg.material.includes(m)?cfg.material.filter(x=>x!==m):[...cfg.material,m]);
-
-  useEffect(()=>{
-    db.kv.get("aiPlanDraft").then(row=>{
-      if(row?.value){const d=JSON.parse(row.value);if(d.plan){setPlan(d.plan);setView("plan");setHasDraft(true);}if(d.cfg)setCfg(c=>({...c,...d.cfg}));}
-    }).catch(()=>{});
-  },[]);
-
-  const saveDraft=(p,c)=>db.kv.put({key:"aiPlanDraft",value:JSON.stringify({plan:p,cfg:c,savedAt:now()})}).catch(()=>{});
-  const clearDraft=()=>db.kv.delete("aiPlanDraft").catch(()=>{});
-
-  const SYS=`Du bist erfahrener G-Jugend (U7) Trainer in Hamburg (HFV). Erstelle einen praxistauglichen Trainingsplan als strukturiertes BRIEFING – so klar, dass jeder Trainer sofort weiß was wann zu tun ist.
-
-TRAININGSSTRUKTUR (60 Min, skaliere proportional):
-1. ANKOMMEN (10 Min): Freies Spiel, kein Trainer-Input. Trainer nutzen diese Zeit um Stationen aufzubauen. Schreibe explizit: "Trainer bauen in dieser Zeit Station X auf."
-2. AUFWÄRMEN (10-15 Min): Alle zusammen, einfaches Bewegungsspiel.
-3. HAUPTTEIL (25-30 Min): Stationen/Gruppen/Spielformen.
-4. ABSCHLUSS (5-10 Min): Freies Spiel oder kurze Spielform.
-
-HAUPTTEIL – wähle passende Strategie:
-A) STATIONEN+ROTATION (≥2 Trainer): Beschreibe exakt: "Team 1 (4 Kinder) → Station A mit Trainer 1. Team 2 (4 Kinder) → Station B mit Trainer 2. Team 3+4 spielen auf Feld C ohne Trainer. Nach 8 Min: Pfiff → Team 1 geht zu B, Team 2 zu C, Team 3+4 zu A."
-B) PARALLEL: Teile in zwei Gruppen, jede hat eigene Aufgabe.
-C) ALLE ZUSAMMEN: Alle machen gleichzeitig dasselbe.
-D) ROUND ROBIN: Kurze Spiele, jeder gegen jeden.
-
-FÜR JEDE PHASE schreibe:
-- Was passiert genau (Schritt für Schritt)
-- Wer macht was (welches Team, welcher Trainer)
-- Wann und wie rotiert wird (exakte Ansage: "Pfiff nach 8 Min: Team 1 rückt zu Station 2")
-- Was Trainer parallel aufbauen sollen
-- Wie viele Kinder wo aktiv sind
-
-G-JUGEND: Kein Torwart. Minitore/Hütchentore. 2v2 bis 4v4. Max 3 Sätze Ansage. Spaß > Perfektion. Nie >2 Min Leerlauf.
-
-Nutze Bibliotheksübungen wenn verfügbar. Neue Übungen detailliert unter newExercises mit sketchPrompt.
-
-Antworte NUR mit JSON:
-{"title":"","briefing":"Kurze Zusammenfassung des Trainings in 2 Sätzen für alle Trainer","phases":[{"name":"","duration":10,"type":"free|warmup|stations|game|exercise","description":"","setup":"","exerciseTitle":"","material":[],"tips":"","playerDistribution":"","minCoaches":1,"rotationMinutes":0,"rotationInstruction":"z.B. Nach 8 Min Pfiff: Team 1→Station 2, Team 2→Station 3, Team 3→Station 1","trainerTask":"Was Trainer in dieser Phase parallel tun sollen (z.B. Station aufbauen)","stations":[{"label":"","teams":[""],"exercise":"","description":"","setup":"","playerCount":"","trainerNeeded":false,"material":[]}]}],"teams":[{"name":"","size":4}],"totalDuration":60,"generalTips":"","newExercises":[{"title":"","category":"uebung","description":"","setup":"","material":[],"minPlayers":4,"maxPlayers":12,"duration":10,"tags":[],"coachingPoints":[],"variante":{"leichter":"","schwerer":""},"playerCount":"","sketchPrompt":""}]}`;
-
-  const generate=async()=>{
-    setLoading(true);setError("");
-    const lib=cfg.useLib&&exercises.length>0?`\nBibliothek:\n${exercises.slice(0,15).map(e=>`- "${e.title}" (${CATS[e.category]?.label}, ${e.duration}min${e.material?.length?`, Mat: ${e.material.join(",")}`:""})` ).join("\n")}`:"";
-    const msg=`${cfg.kids} Kinder, ${cfg.coaches} Trainer, ${cfg.duration} Min, ${cfg.location==="indoor"?"Indoor (Halle)":"Outdoor"}. Material: ${cfg.material.join(", ") || "–"}${cfg.focus?`. Schwerpunkt: ${cfg.focus}`:""}${lib}`;
-    try{
-      const r=await callClaude([{role:"user",content:msg}],apiKey,SYS);
-      const d=parseJsonSafe(r);
-      if(!d?.phases)throw new Error("Ungültige Antwort – bitte erneut versuchen");
-      setPlan(d);setView("plan");saveDraft(d,cfg);
-    }catch(e){setError(e.message);}
-    setLoading(false);
-  };
-
-  const findLib=title=>exercises.find(e=>e.title?.toLowerCase()===title?.toLowerCase());
-
-  const openDetail=(title,desc,setup,mat,cat,tips)=>{
-    const lib=findLib(title);
-    setDetailEx(lib||{title:title||"",description:desc||"",setup:setup||"",material:mat||[],category:cat||"technik",tips:tips||"",id:null});
-    setView("detail");
-  };
-
-  const openReplace=(phaseIdx,stationIdx,category)=>{setReplaceTarget({phaseIdx,stationIdx,category});setView("replace");};
-
-  const doReplace=ex=>{
-    if(!replaceTarget)return;
-    const {phaseIdx,stationIdx}=replaceTarget;
-    setPlan(p=>{
-      const phases=p.phases.map((ph,i)=>{
-        if(i!==phaseIdx)return ph;
-        if(stationIdx!=null){
-          const stations=(ph.stations||[]).map((st,j)=>j!==stationIdx?st:{...st,exercise:ex.title,description:ex.description||"",setup:ex.setup||"",material:ex.material||[]});
-          return {...ph,stations};
-        }
-        return {...ph,exerciseTitle:ex.title,description:ex.description||ph.description,setup:ex.setup||ph.setup,material:ex.material||ph.material};
-      });
-      const np={...p,phases};saveDraft(np,cfg);return np;
-    });
-    setView("plan");setReplaceTarget(null);
-  };
-
-  const getExIds=()=>{
-    const ids=new Set();
-    plan?.phases?.forEach(ph=>{
-      if(ph.stations){ph.stations.forEach(st=>{const e=findLib(st.exercise);if(e)ids.add(e.id);});}
-      else{const e=findLib(ph.exerciseTitle);if(e)ids.add(e.id);}
-    });
-    return[...ids];
-  };
-
-  const saveAsTraining=()=>{
-    if(!onSaveSession)return;
-    const draft={id:replaceId||uid(),createdAt:now(),date:setup?.date||todayISO(),duration:cfg.duration,location:cfg.location==="indoor"?"Halle":"",weather:"",participantCount:String(cfg.kids),coachIds:setup?.coachIds||[],playerIds:setup?.playerIds||[],exerciseIds:getExIds(),teams:[],notes:`📋 KI-Entwurf: ${plan.title}${plan.generalTips?'\n💡 '+plan.generalTips:""}`,isDraft:!replaceId};
-    onSaveSession(draft);clearDraft();onClose();
-  };
-
-  const phBg={free:"#f8fafc",warmup:"#fff7ed",stations:"#f0fdf4",game:"#eff6ff",exercise:"#f5f3ff"};
-  const phEmoji={free:"⚽",warmup:"🔥",stations:"🔄",game:"🏆",exercise:"🎯"};
-  const ReplBtn=({onClick})=><button onClick={onClick} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:6,cursor:"pointer",fontSize:11,color:C.muted,padding:"2px 8px",fontFamily:"inherit",flexShrink:0,whiteSpace:"nowrap"}}>🔄 Ersetzen</button>;
-  const ExLink=({title,desc,setup,mat,cat,tips})=>title?<button onClick={()=>openDetail(title,desc,setup,mat,cat,tips)} style={{fontWeight:700,fontSize:13,color:C.primary,background:"none",border:"none",cursor:"pointer",padding:0,fontFamily:"inherit",textDecoration:"underline",textAlign:"left"}}>{title}{findLib(title)?" 📚":""}</button>:null;
-
-  // ── DETAIL VIEW ────────────────────────────────────────────────────
-  if(view==="detail"&&detailEx) return(<div>
-    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16,flexWrap:"wrap"}}>
-      <Btn sm variant="secondary" onClick={()=>setView("plan")}>← Plan</Btn>
-      {detailEx.category&&<CatBadge cat={detailEx.category}/>}
-      {!detailEx.id&&<span style={{fontSize:11,color:C.muted,padding:"2px 8px",background:"#faf5ff",borderRadius:20,border:"1px solid #e9d5ff"}}>🤖 KI-Übung</span>}
-    </div>
-    <h3 style={{margin:"0 0 14px",fontWeight:800,color:C.text,fontSize:17}}>{detailEx.title}</h3>
-    {detailEx.setup&&<div style={{marginBottom:12}}><div style={{fontSize:11,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:4}}>📐 Aufbau</div><div style={{background:"#f8fafc",borderRadius:8,padding:"10px 12px",fontSize:14,color:C.text,lineHeight:1.6,border:`1px solid ${C.border}`}}>{detailEx.setup}</div></div>}
-    {detailEx.description&&<div style={{marginBottom:12}}><div style={{fontSize:11,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:4}}>🎯 Ablauf</div><div style={{background:"#f8fafc",borderRadius:8,padding:"10px 12px",fontSize:14,color:C.text,lineHeight:1.6,border:`1px solid ${C.border}`}}>{detailEx.description}</div></div>}
-    {detailEx.tips&&<div style={{marginBottom:12,background:"#faf5ff",borderRadius:8,padding:"8px 12px",fontSize:13,color:"#6d28d9",border:"1px solid #e9d5ff"}}>💡 {detailEx.tips}</div>}
-    {detailEx.material?.length>0&&<div style={{marginBottom:12}}><div style={{fontSize:11,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>📦 Material</div><div style={{display:"flex",flexWrap:"wrap",gap:6}}>{detailEx.material.map(m=><span key={m} style={{padding:"4px 10px",borderRadius:20,background:C.accentL,color:C.primary,fontSize:12,fontWeight:700}}>📦 {m}</span>)}</div></div>}
-    {detailEx.tags?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:4}}>{detailEx.tags.map(t=><span key={t} style={{padding:"3px 8px",borderRadius:20,background:"#f1f5f9",color:C.muted,fontSize:11,fontWeight:600}}>{t}</span>)}</div>}
-    {detailEx.notes&&<div style={{marginTop:12,fontSize:13,color:C.muted,fontStyle:"italic"}}>💬 {detailEx.notes}</div>}
-    <div style={{marginTop:20,paddingTop:16,borderTop:`1px solid ${C.border}`,display:"flex",gap:8,justifyContent:"flex-end"}}>
-      <Btn sm variant="secondary" onClick={()=>setView("plan")}>← Zurück zum Plan</Btn>
-    </div>
-  </div>);
-
-  // ── REPLACE VIEW ───────────────────────────────────────────────────
-  if(view==="replace"&&replaceTarget){
-    const cat=replaceTarget.category;
-    const pool=exercises.filter(e=>!cat||normCat(e.category)===normCat(cat));
-    const all=pool.length>0?pool:exercises;
-    return(<div>
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14,flexWrap:"wrap"}}>
-        <Btn sm variant="secondary" onClick={()=>setView("plan")}>← Plan</Btn>
-        <span style={{fontWeight:700,color:C.text}}>Übung ersetzen</span>
-        {cat&&<CatBadge cat={cat} small/>}
-      </div>
-      {all.length===0?<div style={{textAlign:"center",padding:"30px 0",color:C.muted,fontSize:14}}>Keine Übungen in der Bibliothek.<br/>Füge zuerst Übungen in der Bibliothek hinzu.</div>:
-        <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:420,overflowY:"auto"}}>
-          {all.map(ex=><div key={ex.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:"10px 14px",borderRadius:8,border:`1.5px solid ${C.border}`,background:"white",flexWrap:"wrap"}}>
-            <div style={{flex:1,minWidth:0}}>
-              <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:2}}><span style={{fontWeight:700,fontSize:13,color:C.text}}>{ex.title}</span><CatBadge cat={ex.category} small/></div>
-              {ex.description&&<div style={{fontSize:12,color:C.muted,lineHeight:1.4}}>{ex.description.slice(0,90)}{ex.description.length>90?"…":""}</div>}
-            </div>
-            <Btn sm onClick={()=>doReplace(ex)}>Verwenden</Btn>
-          </div>)}
-        </div>}
-    </div>);
-  }
-
-  // ── PLAN VIEW ──────────────────────────────────────────────────────
-  if(plan&&view==="plan") return(<div>
-    {hasDraft&&<div style={{background:"#fffbeb",borderRadius:8,padding:"8px 12px",marginBottom:12,border:"1px solid #fde68a",fontSize:12,color:"#92400e",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-      <span>📋 Entwurf wiederhergestellt</span>
-      <button onClick={()=>{setPlan(null);setView("config");clearDraft();setHasDraft(false);}} style={{background:"none",border:"none",cursor:"pointer",color:"#dc2626",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>✕ Verwerfen</button>
-    </div>}
-    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
-      <h3 style={{margin:0,fontWeight:800,color:C.text,fontSize:16}}>{plan.title}</h3>
-      <span style={{fontSize:13,color:C.muted}}>⏱ {plan.totalDuration} Min · {cfg.location==="indoor"?"🏠 Halle":"☀️ Outdoor"}</span>
-    </div>
-    {plan.briefing&&<div style={{background:"#f0fdf4",borderRadius:10,padding:"10px 14px",marginBottom:12,border:"1px solid #bbf7d0",fontSize:14,color:"#15803d",fontWeight:600,lineHeight:1.5}}>📋 {plan.briefing}</div>}
-    {plan.teams?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:12}}>
-      {plan.teams.map((t,i)=><span key={i} style={{padding:"3px 10px",borderRadius:20,background:TCOLORS[i%TCOLORS.length]+"22",color:TCOLORS[i%TCOLORS.length],fontSize:12,fontWeight:700,border:`1.5px solid ${TCOLORS[i%TCOLORS.length]}55`}}>{t.name} ({t.size}👦)</span>)}
-    </div>}
-    <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:14}}>
-      {plan.phases.map((ph,i)=>{
-        const bg=phBg[ph.type]||"#f8fafc";
-        const em=phEmoji[ph.type]||"📋";
-        const catForReplace=ph.type==="warmup"?"aufwaermen":ph.type==="game"?"spielform":ph.type==="exercise"?"uebung":null;
-        return(<div key={i} style={{borderRadius:10,border:`1.5px solid ${C.border}`,overflow:"hidden"}}>
-          <div style={{background:bg,padding:"8px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
-            <div style={{fontWeight:800,fontSize:14,color:C.text}}>{em} {ph.name}</div>
-            <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
-              <span style={{fontSize:12,color:C.muted,fontWeight:600}}>⏱ {ph.duration}m</span>
-              {ph.type!=="free"&&ph.type!=="stations"&&<ReplBtn onClick={()=>openReplace(i,null,catForReplace)}/>}
-            </div>
-          </div>
-          <div style={{padding:"10px 14px"}}>
-            {ph.exerciseTitle&&<div style={{marginBottom:4}}><ExLink title={ph.exerciseTitle} desc={ph.description} setup={ph.setup} mat={ph.material} cat={ph.type} tips={ph.tips}/></div>}
-            {ph.description&&<div style={{fontSize:13,color:C.text,lineHeight:1.6,marginBottom:6,opacity:ph.exerciseTitle?0.7:1}}>{ph.description}</div>}
-            {ph.setup&&<div style={{fontSize:12,color:C.muted,background:"#f8fafc",borderRadius:6,padding:"6px 10px",marginBottom:6}}>📐 {ph.setup}</div>}
-            {ph.stations?.length>0&&<div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:4}}>
-              {ph.rotationMinutes>0&&<div style={{fontSize:12,color:"#7c3aed",fontWeight:700}}>🔄 Rotation alle {ph.rotationMinutes} Min</div>}
-              {ph.stations.map((st,j)=><div key={j} style={{borderRadius:8,border:`1px solid ${C.border}`,padding:"8px 12px",background:"white"}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:6,marginBottom:3}}>
-                  <div style={{fontWeight:700,fontSize:13,color:C.primary}}>{st.label}</div>
-                  <ReplBtn onClick={()=>openReplace(i,j,"uebung")}/>
-                </div>
-                {st.teams?.length>0&&<div style={{fontSize:11,color:C.muted,marginBottom:3}}>👦 {st.teams.join(" · ")}</div>}
-                <ExLink title={st.exercise} desc={st.description} setup={st.setup} mat={st.material} cat="uebung" tips=""/>
-                {st.description&&<div style={{fontSize:12,color:C.muted,lineHeight:1.5,marginTop:2}}>{st.description}</div>}
-                {st.playerCount&&<div style={{fontSize:11,color:"#0369a1",fontWeight:700,marginTop:3}}>👥 {st.playerCount}{st.trainerNeeded?" · 🧑‍🏫 Trainer nötig":""}</div>}
-                {st.material?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:3,marginTop:4}}>{st.material.map(m=><span key={m} style={{fontSize:10,padding:"2px 6px",borderRadius:10,background:C.accentL,color:C.primary,fontWeight:600}}>📦 {m}</span>)}</div>}
-              </div>)}
-            </div>}
-            {ph.material?.length>0&&!ph.stations?.length&&<div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:4}}>{ph.material.map(m=><span key={m} style={{fontSize:11,padding:"2px 8px",borderRadius:20,background:C.accentL,color:C.primary,fontWeight:600}}>📦 {m}</span>)}</div>}
-            {ph.playerDistribution&&<div style={{fontSize:12,background:"#f0f9ff",borderRadius:6,padding:"5px 10px",marginTop:4,color:"#0369a1",fontWeight:600}}>👥 {ph.playerDistribution}{ph.minCoaches>0?` · 🧑‍🏫 min. ${ph.minCoaches} Trainer`:""}</div>}
-            {ph.rotationInstruction&&<div style={{fontSize:12,background:"#fef9c3",borderRadius:6,padding:"6px 10px",marginTop:4,color:"#92400e",fontWeight:600,lineHeight:1.5}}>🔄 {ph.rotationInstruction}</div>}
-            {ph.trainerTask&&<div style={{fontSize:12,background:"#faf5ff",borderRadius:6,padding:"5px 10px",marginTop:4,color:"#6d28d9",fontWeight:600}}>🧑‍🏫 Trainer: {ph.trainerTask}</div>}
-            {ph.tips&&<div style={{fontSize:12,color:"#7c3aed",fontStyle:"italic",marginTop:4}}>💡 {ph.tips}</div>}
-          </div>
-        </div>);
-      })}
-    </div>
-    {plan.generalTips&&<div style={{background:"#faf5ff",borderRadius:10,padding:"12px 14px",border:"1px solid #e9d5ff",fontSize:13,color:"#6d28d9",marginBottom:12}}><strong>💡 </strong>{plan.generalTips}</div>}
-    {plan.newExercises?.filter(ex=>ex.title).length>0&&<div style={{marginBottom:12}}>
-      <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>🆕 Neue Übungen speichern</div>
-      <div style={{display:"flex",flexDirection:"column",gap:6}}>
-        {plan.newExercises.filter(ex=>ex.title).map((ex,i)=>{
-          const isSaved=saved.includes(i);
-          return(<div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:8,border:`1.5px solid ${isSaved?"#22c55e":C.border}`,background:isSaved?"#f0fdf4":"white",flexWrap:"wrap"}}>
-            <div style={{flex:1,minWidth:0}}>
-              <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}><span style={{fontWeight:700,fontSize:13,color:C.text}}>{ex.title}</span><CatBadge cat={ex.category} small/></div>
-              {ex.playerCount&&<div style={{fontSize:11,color:"#0369a1",fontWeight:700,marginTop:2}}>👥 {ex.playerCount}</div>}
-            {ex.description&&<div style={{fontSize:12,color:C.muted,marginTop:2}}>{ex.description.slice(0,100)}{ex.description.length>100?"…":""}</div>}
-            {ex.coachingPoints?.length>0&&<div style={{fontSize:11,color:"#7c3aed",marginTop:3}}>💡 {ex.coachingPoints[0]}</div>}
-            </div>
-            {isSaved?<span style={{fontSize:12,color:"#16a34a",fontWeight:700,flexShrink:0}}>✅ Gespeichert</span>:
-              onSaveEx&&<Btn sm onClick={async()=>{
-  let imageUrl="";
-  if(ex.sketchPrompt&&apiKey){
-    try{
-      const r=await callClaude([{role:"user",content:`Erstelle eine einfache, klare Trainingsskizze als SVG für diese Übung. Nutze: Kreise für Spieler, Dreiecke/Hütchen für Aufbau, Pfeile für Bewegungsrichtungen. Schwarz-weiß. Beschriftung auf Deutsch. Gib NUR valides SVG zurück, kein anderer Text.\n\nÜbung: ${ex.title}\nAufbau: ${ex.sketchPrompt}`}],apiKey);
-      const svg=r.match(/<svg[\s\S]*<\/svg>/)?.[0];
-      if(svg) imageUrl="data:image/svg+xml;base64,"+btoa(unescape(encodeURIComponent(svg)));
-    }catch(e){}
-  }
-  const notes=[ex.coachingPoints?.length?`💡 Tipps:\n${ex.coachingPoints.map(t=>`• ${t}`).join("\n")}`:"",ex.variante?.leichter?`📉 Leichter: ${ex.variante.leichter}`:"",ex.variante?.schwerer?`📈 Schwerer: ${ex.variante.schwerer}`:""].filter(Boolean).join("\n\n");
-  onSaveEx({...ex,id:uid(),createdAt:now(),updatedAt:now(),rating:0,done:false,imageUrl,source:"KI-Trainingsplan",notes});
-  setSaved(s=>[...s,i]);
-}}><Plus size={12}/> Speichern{ex.sketchPrompt?" + Skizze":""}</Btn>}
-          </div>);
-        })}
-      </div>
-    </div>}
-    <div style={{display:"flex",gap:10,justifyContent:"flex-end",flexWrap:"wrap",paddingTop:14,borderTop:`1px solid ${C.border}`}}>
-      <Btn onClick={()=>{setPlan(null);setView("config");}} variant="secondary"><RefreshCw size={14}/> Neu generieren</Btn>
-      {onSaveSession&&<Btn onClick={saveAsTraining}><CalendarDays size={14}/> Als Entwurf speichern</Btn>}
-    </div>
-  </div>);
-
-  // ── CONFIG VIEW ────────────────────────────────────────────────────
-  return(<div>
-    <div style={{background:"#faf5ff",borderRadius:10,padding:"12px 14px",marginBottom:14,border:"1px solid #e9d5ff",fontSize:13,color:"#6d28d9"}}>🤖 KI plant Stationen, Rotation und Spielzeit – optimiert für Trainer- und Kinderzahl. Plan wird automatisch als Entwurf gespeichert.</div>
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:14}}>
-      <div><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Kinder</label><Stepper value={cfg.kids} onChange={v=>set("kids",v)} min={4} max={30}/></div>
-      <div><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Trainer</label><Stepper value={cfg.coaches} onChange={v=>set("coaches",v)} min={1} max={6}/></div>
-      <div><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Minuten</label><Stepper value={cfg.duration} onChange={v=>set("duration",v)} min={20} max={120}/></div>
-    </div>
-    <div style={{marginBottom:14}}>
-      <label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Ort</label>
-      <div style={{display:"flex",gap:8}}>
-        {[["outdoor","☀️ Outdoor"],["indoor","🏠 Indoor (Halle)"]].map(([k,l])=><button key={k} onClick={()=>set("location",k)} style={{flex:1,padding:"8px",borderRadius:8,border:`2px solid ${cfg.location===k?C.primary:C.border}`,background:cfg.location===k?C.accentL:"white",color:cfg.location===k?C.primary:C.muted,cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"inherit"}}>{l}</button>)}
-      </div>
-    </div>
-    <div style={{marginBottom:14}}>
-      <label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Verfügbares Material <span style={{fontSize:11,fontWeight:400,textTransform:"none"}}>– abwählen was fehlt</span></label>
-      <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-        {MAT_OPTS.map(m=>{const on=cfg.material.includes(m);return<button key={m} onClick={()=>togMat(m)} style={{padding:"5px 12px",borderRadius:20,border:`1.5px solid ${on?C.primary:C.border}`,background:on?C.accentL:"white",color:on?C.primary:C.muted,cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>📦 {m}</button>;})}
-      </div>
-    </div>
-    <div style={{marginBottom:14}}>
-      <label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Schwerpunkt (optional)</label>
-      <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
-        {["Dribbeln","Passspiel","Torschuss","Koordination","Zweikampf","Spaß & Spiel","Schnelligkeit","Teamwork","Raumgefühl","Funino"].map(s=>{const active=cfg.focus===s;return<button key={s} onClick={()=>set("focus",active?"":s)} style={{padding:"5px 12px",borderRadius:20,border:`1.5px solid ${active?C.primary:C.border}`,background:active?C.accentL:"white",color:active?C.primary:C.muted,cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>{s}</button>;})}
-      </div>
-      <input value={cfg.focus} onChange={e=>set("focus",e.target.value)} placeholder="Oder eigenen Schwerpunkt eingeben..." style={{width:"100%",padding:"8px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,outline:"none",boxSizing:"border-box",fontFamily:"inherit",color:C.text}}/>
-    </div>
-    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}><input type="checkbox" id="ul" checked={cfg.useLib} onChange={e=>set("useLib",e.target.checked)} style={{width:16,height:16}}/><label htmlFor="ul" style={{fontSize:14,color:C.text,cursor:"pointer"}}>Meine Bibliothek berücksichtigen ({exercises.length} Übungen)</label></div>
-    {error&&<div style={{color:"#ef4444",fontSize:13,marginBottom:12,fontWeight:600}}>❌ {error}</div>}
-    <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Btn onClick={onClose} variant="secondary">Abbrechen</Btn><Btn onClick={generate} variant="ai" disabled={loading}>{loading?<><RefreshCw size={14} style={{animation:"spin 1s linear infinite"}}/> Plane...</>:<><Bot size={14}/> Neues Training</>}</Btn></div>
   </div>);
 }
 
@@ -2176,407 +1897,6 @@ function SessionForm({session,players,coaches,exercises,onSave,onClose}) {
 }
 
 
-// ── MANUAL TRAINING PLANNER ──────────────────────────────────────
-const BLOCKS = [
-  {key:"ankommen",    label:"Ankommen",          emoji:"🚪", cat:null,       defaultMin:10, fixedFree:true},
-  {key:"aufwaermen",  label:"Aufwärmen",          emoji:"🔥", cat:"aufwaermen",              defaultMin:10},
-  {key:"mittel1",     label:"Hauptblock 1",       emoji:"🎯", cat:"koordination",            defaultMin:15},
-  {key:"mittel2",     label:"Hauptblock 2",       emoji:"⚽", cat:"technik",                 defaultMin:12},
-  {key:"spielform",   label:"Spielform / Funino", emoji:"🏆", cat:"spielform",               defaultMin:20},
-  {key:"abschluss",   label:"Abschluss",          emoji:"🌅", cat:"abschluss",               defaultMin:5},
-];
-
-function ManualTrainingPlanner({exercises,players,coachesList=[],onClose,onSaveSession,apiKey,toast,setup,replaceId}) {
-  const activeCount=players.filter(p=>p.active).length;
-  const [kids,setKids]=useState(setup?.kids||activeCount||10);
-  const [coaches,setCoaches]=useState(setup?.coachCount||1);
-  const [totalMin,setTotalMin]=useState(setup?.duration||60);
-  const [blocks,setBlocks]=useState(()=>{
-    const pd=setup?.planData;
-    if(pd?.phases){
-      // Restore blocks from saved planData
-      return BLOCKS.map(b=>{
-        const ph=pd.phases.find(p=>p.block?.key===b.key);
-        if(!ph) return {...b,active:false,parallel:false,stations:2,parallelExercises:{},pick:"random",exerciseId:null,minutes:b.defaultMin};
-        // ph.block contains the exact configuration used to generate this phase
-        return {...b,...ph.block,active:true,minutes:ph.minutes||b.defaultMin};
-      });
-    }
-    return BLOCKS.map(b=>({...b,active:b.key!=="mittel2",parallel:false,stations:2,parallelExercises:{},pick:"random",exerciseId:null,minutes:b.defaultMin}));
-  });
-  const [breakMin,setBreakMin]=useState(setup?.planData?.breakMin??2);
-  const [plan,setPlan]=useState(null);
-  const [planTeams,setPlanTeams]=useState([]);
-  const [showTeamBuilder,setShowTeamBuilder]=useState(false);
-  const [tbNumTeams,setTbNumTeams]=useState(Math.max(2,Math.round((setup?.kids||kids||10)/3)));
-  const [tbMode,setTbMode]=useState("balanced");
-  const [tbSkill,setTbSkill]=useState({strong:0,weak:0});
-  // trainerAssignment: {blockKey: {stationIdx: coachId}}
-  const [trainerAssignment,setTrainerAssignment]=useState({});
-  const setStationTrainer=(blockKey,si,coachId)=>setTrainerAssignment(a=>({...a,[blockKey]:{...(a[blockKey]||{}),[si]:coachId}}));
-  // teamStationMap: {stationIdx: teamId} — which team starts at which station
-  const [teamStationMap,setTeamStationMap]=useState({});
-
-  const setBlock=(key,field,val)=>setBlocks(bs=>bs.map(b=>b.key===key?{...b,[field]:val}:b));
-  const activeBlocks=blocks.filter(b=>b.active);
-  // Breaks happen between blocks (not after ankommen, not after last block)
-  const breakCount=Math.max(0,activeBlocks.filter(b=>!b.fixedFree).length-1);
-  const usedMin=activeBlocks.reduce((s,b)=>s+b.minutes,0)+breakCount*breakMin;
-  const remaining=totalMin-usedMin;
-
-  const pickExercise=(cat,excludeId)=>{
-    const pool=exercises.filter(e=>e.category===cat&&e.id!==excludeId);
-    return pool.length?pool[Math.floor(Math.random()*pool.length)]:null;
-  };
-
-  const setParallelEx=(blockKey,si,exId)=>setBlocks(bs=>bs.map(b=>b.key===blockKey?{...b,parallelExercises:{...b.parallelExercises,[si]:exId}}:b));
-
-  const generate=()=>{
-    const phases=activeBlocks.map(b=>{
-      if(b.fixedFree) return {block:b,exercise:null,stations:null,
-        kidsTotal:kids,kidsPerStation:kids,minutes:b.minutes,isFree:true};
-
-      let ex=null;
-      if(b.pick==="random") ex=pickExercise(b.cat,null);
-      else if(b.pick==="manual"&&b.exerciseId) ex=exercises.find(e=>e.id===b.exerciseId);
-
-      if(b.parallel){
-        const kidsPerStation=Math.floor(kids/b.stations);
-        const remainder=kids-(kidsPerStation*b.stations); // leftover kids
-        // Pick distinct exercises per station (no duplicates)
-        const usedIds=new Set();
-        const stations=Array.from({length:b.stations},(_,i)=>{
-          const manualId=b.parallelExercises?.[i];
-          let stEx=null;
-          if(manualId){
-            stEx=exercises.find(e=>e.id===manualId);
-          } else {
-            // Pick random, avoid already used in this block
-            const pool=exercises.filter(e=>(!b.cat||e.category===b.cat)&&!usedIds.has(e.id));
-            stEx=pool.length?pool[Math.floor(Math.random()*pool.length)]:null;
-          }
-          if(stEx) usedIds.add(stEx.id);
-          return {label:`Gruppe ${i+1}`,exercise:stEx,
-            kids:kidsPerStation+(i<remainder?1:0), // distribute remainder kids
-            manualId:manualId||null};
-        });
-        const ta=trainerAssignment[b.key]||{};
-        const stationsWithTrainer=stations.map((st,i)=>({...st,
-          trainerId:ta[i]||null,
-          trainerName:ta[i]?(coachesList.find(c=>c.id===ta[i])?.name||""):null}));
-        return {block:b,exercise:null,stations:stationsWithTrainer,
-          kidsTotal:kids,kidsPerStation,minutes:b.minutes};
-      }
-
-      return {block:b,exercise:ex,stations:null,
-        kidsTotal:kids,kidsPerStation:kids,minutes:b.minutes};
-    });
-    setPlan({phases,kids,coaches,totalMin,breakMin,teamStationMap,date:setup?.date||todayISO(),location:setup?.location||""});
-  };
-
-  const phCol={ankommen:"#f8fafc",aufwaermen:"#fff7ed",koordination:"#f5f3ff",technik:"#eff6ff",spielform:"#f0fdf4",abschluss:"#fdf2f8"};
-
-  const printPlan=()=>{
-    const esc=s=>String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-    const bgMap={ankommen:"#f1f5f9",aufwaermen:"#fff3e0",koordination:"#f3e8ff",technik:"#e8f0fe",spielform:"#e8f5e9",abschluss:"#fce4ec"};
-    const colMap={ankommen:"#475569",aufwaermen:"#e65100",koordination:"#6d28d9",technik:"#1a56db",spielform:"#166534",abschluss:"#9d174d"};
-
-    const exBlock=(ex)=>{
-      if(!ex) return `<p style="color:#9ca3af;font-style:italic;margin:4px 0">Freie Übung / vor Ort bestimmen</p>`;
-      const img=ex.imageUrl?`<img src="${ex.imageUrl}" style="width:100%;height:auto;display:block;background:#f8fafc;border-radius:6px;margin:8px 0;border:1px solid #e5e7eb;box-sizing:content-box" onerror="this.style.display='none'"/>`:"";
-      return `${img}
-        ${ex.setup?`<div style="background:#f8fafc;border-radius:6px;padding:8px 12px;margin:6px 0;border-left:3px solid #94a3b8"><span style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase">📐 Aufbau</span><br><span style="font-size:13px;line-height:1.6">${esc(ex.setup)}</span></div>`:""}
-        ${ex.description?`<div style="margin:6px 0"><span style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase">🎯 Ablauf</span><br><p style="font-size:13px;line-height:1.7;margin:4px 0">${esc(ex.description)}</p></div>`:""}
-        ${ex.material?.length?`<div style="font-size:12px;color:#6b7280;margin:4px 0">📦 ${esc(ex.material.join(", "))}</div>`:""}
-        ${ex.notes?`<div style="padding:6px 10px;background:#faf5ff;border-radius:6px;font-size:12px;color:#6d28d9;font-style:italic;margin-top:6px">💡 ${esc(ex.notes)}</div>`:""}`;
-    };
-
-    // Timeline overview
-    let cursor=0;
-    const tl=[];
-    plan.phases.forEach((ph,i)=>{
-      tl.push({label:`${ph.block.emoji} ${esc(ph.block.label)}`,min:ph.minutes,col:colMap[ph.block.cat||ph.block.key]||"#374151"});
-      cursor+=ph.minutes;
-      if(i<plan.phases.length-1&&plan.breakMin>0&&!ph.isFree){tl.push({label:"⏸",min:plan.breakMin,col:"#94a3b8"});cursor+=plan.breakMin;}
-    });
-    const timelineHtml=`<div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-bottom:20px;padding:10px 14px;background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0">
-      ${tl.map(t=>`<span style="padding:3px 10px;border-radius:20px;background:${t.col}18;border:1px solid ${t.col}33;font-size:12px;font-weight:700;color:${t.col}">${t.label} ${t.min}m</span>`).join('<span style="color:#cbd5e1;font-size:12px"> → </span>')}
-      <span style="margin-left:auto;font-size:12px;color:#6b7280">= ${cursor} / ${plan.totalMin} Min</span>
-    </div>`;
-
-    const rows=plan.phases.map((ph,i)=>{
-      const bg=bgMap[ph.block.cat||ph.block.key]||"#f8fafc";
-      const col=colMap[ph.block.cat||ph.block.key]||"#374151";
-      const kidsLabel=ph.stations?`${ph.kidsPerStation}/Gruppe · ${ph.kidsTotal} gesamt`:`${ph.kidsTotal} Kinder`;
-      let body="";
-      if(ph.isFree){
-        body=`<div style="padding:12px 14px">
-          <p style="margin:0 0 6px;font-size:14px">⚽ <strong>Kinder spielen frei</strong> — kein Trainer-Input nötig.</p>
-          <p style="margin:0;padding:8px 12px;background:#faf5ff;border-radius:6px;color:#6d28d9;font-size:13px">🧑‍🏫 Trainer nutzen diese <strong>${ph.minutes} Min</strong> zum Aufbau der nächsten Station.</p>
-        </div>`;
-      } else if(ph.stations){
-        const rot=Math.floor(ph.minutes/ph.stations.length);
-        const swaps=ph.stations.length-1;
-        body=`<div style="padding:8px 14px;background:#faf5ff;border-bottom:1px solid #e9d5ff">
-          <strong style="font-size:13px;color:#7c3aed">🔄 ${ph.stations.length} Stationen parallel</strong>
-          <span style="font-size:12px;color:#6d28d9;margin-left:8px">Rotation alle <strong>${rot} Min</strong> · ${swaps}× wechseln · ${ph.minutes} Min gesamt</span>
-        </div>`;
-        body+=ph.stations.map((st,j)=>`
-          <div style="padding:12px 14px;border-top:1px solid #f1f5f9;page-break-inside:avoid">
-            <div style="font-weight:800;font-size:14px;color:#1d4ed8;margin-bottom:8px">📍 ${esc(st.label)} · ${st.kids} Kinder${st.exercise?" — "+esc(st.exercise.title):""}</div>
-            ${exBlock(st.exercise)}
-          </div>`).join("");
-        body+=`<div style="padding:8px 14px;background:#fef9c3;border-top:1px solid #fde047;font-size:12px;color:#92400e;font-weight:600">⏱ Zeitplan: ${Array.from({length:ph.stations.length},(_, i)=>`${i*rot}–${(i+1)*rot} Min → Station ${i+1}`).join(" → ")}</div>`;
-      } else {
-        body=`<div style="padding:12px 14px">${ph.exercise?`<div style="font-weight:800;font-size:15px;color:#111;margin-bottom:8px">${esc(ph.exercise.title)}</div>${exBlock(ph.exercise)}`:`<p style="color:#9ca3af;font-style:italic">Freie Übung / vor Ort bestimmen</p>`}</div>`;
-      }
-      return `<div style="border:1.5px solid #e2e8f0;border-radius:10px;margin-bottom:14px">
-          <div style="background:${bg};padding:10px 16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
-            <span style="font-weight:900;font-size:16px;color:${col}">${ph.block.emoji} ${esc(ph.block.label)}</span>
-            <span style="font-size:13px;color:#475569;font-weight:700">⏱ ${ph.minutes} Min &nbsp; 👥 ${kidsLabel}</span>
-          </div>${body}</div>`;
-    }).join("");
-
-    const teamsHtml=planTeams.length?`<div style="margin-top:20px;border:1.5px solid #e2e8f0;border-radius:10px;page-break-inside:avoid"><div style="background:#f0fdf4;padding:10px 16px;font-weight:800;font-size:14px;color:#166534">👥 Teams</div><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;padding:12px">${planTeams.map(t=>`<div style="border:1.5px solid #e2e8f0;border-radius:8px;padding:10px"><div style="font-weight:800;font-size:13px;color:#1d4ed8;margin-bottom:6px">${esc(t.name)}</div>${t.players.map(p=>`<div style="font-size:12px;padding:2px 0;border-bottom:1px solid #f1f5f9">${esc(p.name)}</div>`).join("")}</div>`).join("")}</div></div>`:"";
-
-    const css=`${PDF_CSS}`;
-    const html=`<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>Trainingsplan ${esc(plan.date||todayISO())}</title><style>${css}</style></head><body>
-      <h1>Trainingsplan</h1>
-      <div class="meta">📅 ${esc(plan.date||todayISO())} · ⏱ ${plan.totalMin} Min · 👥 ${plan.kids} Kinder · 🧑‍🏫 ${plan.coaches} Trainer${plan.location?` · 📍 ${esc(plan.location)}`:""}${plan.breakMin>0?` · ⏸ ${plan.breakMin} Min Pausen`:""}</div>
-      ${timelineHtml}${matHtml}${rows}${teamsHtml}
-      <div class="footer">Erstellt mit G-Jugend Coach App · ${new Date().toLocaleDateString("de-DE")}</div>
-${PDF_SCRIPT}</body></html>`;
-    const w=window.open("","_blank");
-    if(w){w.document.write(html);w.document.close();w.onload=()=>setTimeout(()=>w.print(),300);setTimeout(()=>w.print(),800);}
-    else{saveFileSync(html,"Trainingsplan_"+todayISO()+".html","text/html");toast("Als HTML gespeichert – im Browser öffnen und drucken");}
-  };
-
-  if(plan) return(
-    <div>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,flexWrap:"wrap",gap:8}}>
-        <h3 style={{margin:0,fontWeight:800,color:C.text}}>Trainingsplan</h3>
-        <span style={{fontSize:13,color:C.muted}}>⏱ {plan.totalMin} Min · 👥 {plan.kids} Kinder · 🧑‍🏫 {plan.coaches} Trainer</span>
-      </div>
-      <div style={{display:"flex",flexDirection:"column",gap:0,marginBottom:16}}>
-        {plan.phases.map((ph,i)=>{
-          const showBreak=i<plan.phases.length-1&&!ph.isFree&&plan.breakMin>0;
-          const bg=phCol[ph.block.cat||"ankommen"]||"#f8fafc";
-          const rotMin=ph.stations?.length>0?Math.floor(ph.minutes/ph.stations.length):0;
-          const phaseEl=(<div>
-            <div style={{background:bg,padding:"8px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div style={{fontWeight:800,fontSize:14}}>{ph.block.emoji} {ph.block.label}</div>
-              <div style={{fontSize:12,color:C.muted,display:"flex",gap:10}}>
-                <span>⏱ {ph.minutes} Min</span>
-                <span>👥 {ph.stations?`${ph.kidsPerStation}/Gruppe · ${ph.kidsTotal} gesamt`:ph.kidsTotal} Kinder</span>
-              </div>
-            </div>
-            <div style={{padding:"10px 14px"}}>
-              {ph.isFree
-                ?<div>
-                  <div style={{fontSize:13,color:C.muted,marginBottom:6}}>⚽ Kinder spielen frei — kein Trainer-Input nötig.</div>
-                  <div style={{fontSize:12,color:"#7c3aed",background:"#faf5ff",borderRadius:6,padding:"6px 10px",border:"1px solid #e9d5ff"}}>🧑‍🏫 Trainer nutzen diese {ph.minutes} Min um die nächste Station aufzubauen.</div>
-                </div>
-                :ph.stations
-                ?<div>
-                  <div style={{fontSize:12,color:"#7c3aed",fontWeight:700,marginBottom:8}}>🔄 {ph.block.stations} Gruppen gleichzeitig — Rotation nach {rotMin} Min (Pfiff)</div>
-                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                    {ph.stations.map((st,j)=><div key={j} style={{padding:"10px 12px",background:"#f8fafc",borderRadius:8,border:`1.5px solid ${C.border}`}}>
-                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:4,flexWrap:"wrap"}}>
-                        <span style={{fontWeight:800,fontSize:13,color:C.primary}}>📍 {st.label} · {st.kids} Kinder{st.trainerName?` · 🧑‍🏫 ${st.trainerName}`:""}</span>
-                        {st.exercise&&<CatBadge cat={st.exercise.category} small/>}
-                      </div>
-                      {st.exercise
-                        ?<><div style={{fontWeight:700,fontSize:14,color:C.text,marginBottom:3}}>{st.exercise.title}</div>
-                          {st.exercise.setup&&<div style={{fontSize:12,color:C.muted,marginBottom:2}}>📐 {st.exercise.setup.slice(0,100)}{st.exercise.setup.length>100?"…":""}</div>}
-                          {st.exercise.description&&<div style={{fontSize:13,color:C.text,lineHeight:1.5,marginBottom:3}}>{st.exercise.description.slice(0,120)}{st.exercise.description.length>120?"…":""}</div>}
-                          {st.exercise.material?.length>0&&<div style={{fontSize:11,color:C.muted}}>📦 {st.exercise.material.join(", ")}</div>}</>
-                        :<div style={{fontSize:13,color:C.muted,fontStyle:"italic"}}>Keine Übung in Bibliothek – eigene wählen</div>}
-                    </div>)}
-                    <div style={{fontSize:12,background:"#fef9c3",borderRadius:6,padding:"6px 10px",border:"1px solid #fde047",color:"#92400e",fontWeight:600}}>
-                      ⏱ Nach {rotMin} Min: Pfiff → alle Gruppen rücken eine Station weiter (im Uhrzeigersinn)
-                    </div>
-                  </div>
-                </div>
-                :<div>
-                  {ph.exercise
-                    ?<><div style={{fontWeight:700,fontSize:14,color:C.text,marginBottom:4}}>{ph.exercise.title} <CatBadge cat={ph.exercise.category} small/></div>
-                      {ph.exercise.setup&&<div style={{fontSize:12,color:C.muted,background:"#f8fafc",padding:"5px 10px",borderRadius:6,marginBottom:6}}>📐 {ph.exercise.setup.slice(0,120)}</div>}
-                      {ph.exercise.description&&<div style={{fontSize:13,color:C.muted,lineHeight:1.5,marginBottom:ph.exercise.material?.length?6:0}}>{ph.exercise.description.slice(0,180)}{ph.exercise.description.length>180?"…":""}</div>}
-                      {ph.exercise.material?.length>0&&<div style={{fontSize:12,color:C.muted}}>📦 {ph.exercise.material.join(", ")}</div>}</>
-                    :<div style={{fontSize:14,color:C.muted,fontStyle:"italic"}}>Keine passende Übung in der Bibliothek – eigene wählen oder ergänzen.</div>}
-                </div>}
-            </div>
-          </div>);
-          return <><div key={i} style={{borderRadius:10,border:`1.5px solid ${C.border}`,overflow:"hidden",marginBottom:showBreak?0:10}}>{phaseEl}</div>{showBreak&&<div style={{display:"flex",alignItems:"center",gap:8,padding:"4px 16px",color:"#94a3b8",fontSize:12}}><div style={{flex:1,height:1,background:"#e2e8f0"}}/><span>⏸ {plan.breakMin} Min Pause</span><div style={{flex:1,height:1,background:"#e2e8f0"}}/></div>}</>;
-        })}
-      </div>
-      {remaining!==0&&<div style={{padding:"8px 14px",borderRadius:8,background:remaining>0?"#f0fdf4":"#fef2f2",border:`1px solid ${remaining>0?"#86efac":"#fca5a5"}`,fontSize:13,color:remaining>0?"#166534":"#991b1b",marginBottom:12}}>
-        {remaining>0?`⏰ ${remaining} Min Puffer übrig – ideal für Übergänge und Erklärungen`:`⚠️ ${Math.abs(remaining)} Min zu viel geplant – Blöcke kürzen`}
-      </div>}
-
-      {/* ── Inline Team Builder ── */}
-      <div style={{marginBottom:16}}>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:showTeamBuilder?12:0}}>
-          <div style={{fontWeight:700,fontSize:14,color:C.text}}>👥 Teams für dieses Training</div>
-          <button onClick={()=>setShowTeamBuilder(v=>!v)} style={{padding:"5px 12px",borderRadius:20,border:`1.5px solid ${showTeamBuilder?C.primary:C.border}`,background:showTeamBuilder?C.accentL:"white",color:showTeamBuilder?C.primary:C.muted,cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>
-            {planTeams.length>0?`✅ ${planTeams.length} Teams erstellt ${showTeamBuilder?"▲":"▼"}`:showTeamBuilder?"▲ Einklappen":"+ Teams erstellen"}
-          </button>
-        </div>
-        {showTeamBuilder&&<div style={{background:"#f8fafc",borderRadius:10,border:`1.5px solid ${C.border}`,padding:"14px 16px"}}>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
-            <div><label style={{display:"block",fontSize:11,fontWeight:700,color:C.muted,marginBottom:5,textTransform:"uppercase",letterSpacing:.6}}>Anzahl Teams</label><Stepper value={tbNumTeams} onChange={setTbNumTeams} min={2} max={12}/><div style={{fontSize:11,color:C.muted,marginTop:3}}>≈ {Math.round((plan.kids||plan.phases?.[0]?.kidsTotal||10)/tbNumTeams)} Kinder/Team</div></div>
-            <div><label style={{display:"block",fontSize:11,fontWeight:700,color:C.muted,marginBottom:5,textTransform:"uppercase",letterSpacing:.6}}>Modus</label>
-              <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                {[["balanced","⚖️ Ausgeglichen"],["random","🎲 Zufällig"],["skill","📊 Stärke-Gruppen"],["mixed","🎨 Durchmischt"]].map(([k,l])=><button key={k} onClick={()=>setTbMode(k)} style={{padding:"5px 8px",borderRadius:7,border:`1.5px solid ${tbMode===k?C.primary:C.border}`,background:tbMode===k?C.accentL:"white",color:tbMode===k?C.primary:C.muted,cursor:"pointer",fontWeight:700,fontSize:12,fontFamily:"inherit",textAlign:"left"}}>{l}</button>)}
-              </div>
-            </div>
-          </div>
-          {tbMode==="skill"&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:12}}>
-            {[["strong","💪 Stark","#dc2626","#fee2e2"],["weak","🌱 Schwach","#16a34a","#dcfce7"]].map(([k,l,col,bg])=><div key={k} style={{textAlign:"center",padding:"8px",borderRadius:8,background:bg,border:`1.5px solid ${col}33`}}><div style={{fontSize:11,fontWeight:700,color:col,marginBottom:4}}>{l}</div><Stepper value={tbSkill[k]||0} onChange={v=>setTbSkill(d=>({...d,[k]:Math.min(v,tbNumTeams-1)}))} min={0} max={tbNumTeams-1}/></div>)}
-            <div style={{textAlign:"center",padding:"8px",borderRadius:8,background:"#fef3c7",border:"1.5px solid #fde68a33"}}><div style={{fontSize:11,fontWeight:700,color:"#d97706",marginBottom:4}}>➖ Gemischt</div><div style={{fontWeight:900,fontSize:22,color:"#d97706"}}>{tbNumTeams-(tbSkill.strong||0)-(tbSkill.weak||0)}</div></div>
-          </div>}
-          <div style={{display:"flex",gap:8,marginBottom:planTeams.length?12:0}}>
-            <Btn sm onClick={()=>{const generated=buildTeams(players.filter(p=>p.active),tbNumTeams,tbMode,tbSkill);setPlanTeams(generated);}} style={{flex:1,justifyContent:"center"}}><Shuffle size={13}/> Teams generieren</Btn>
-            {planTeams.length>0&&<Btn sm variant="secondary" onClick={()=>setPlanTeams([])}>✕ Löschen</Btn>}
-          </div>
-          {planTeams.length>0&&<div style={{display:"flex",flexDirection:"column",gap:6}}>
-            {planTeams.map((t,i)=><div key={t.id} style={{padding:"8px 12px",borderRadius:8,background:"white",border:`1.5px solid ${TCOLORS[i%TCOLORS.length]}55`}}>
-              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-                <div style={{width:10,height:10,borderRadius:"50%",background:TCOLORS[i%TCOLORS.length]}}/>
-                <input value={t.name} onChange={e=>setPlanTeams(ts=>ts.map((x,j)=>j===i?{...x,name:e.target.value}:x))} style={{fontWeight:800,fontSize:13,border:"none",outline:"none",background:"transparent",color:C.text,flex:1,fontFamily:"inherit"}}/>
-                <span style={{fontSize:11,color:C.muted}}>{t.players.length} Kinder · Ø {t.players.length?(t.players.reduce((s,p)=>s+p.strength,0)/t.players.length).toFixed(1):"-"}</span>
-              </div>
-              <div style={{display:"flex",flexWrap:"wrap",gap:3}}>{t.players.map(p=><span key={p.id} style={{fontSize:11,padding:"1px 7px",borderRadius:20,background:STR[p.strength]?.light||"#f1f5f9",color:STR[p.strength]?.color||C.muted,fontWeight:600}}>{STR[p.strength]?.emoji} {p.name}</span>)}</div>
-            </div>)}
-          </div>}
-        </div>}
-      </div>
-
-      {/* Team → Station Zuweisung */}
-      {planTeams.length>0&&plan.phases.some(ph=>ph.stations)&&<div style={{marginBottom:16,background:"#f0f9ff",borderRadius:10,border:"1px solid #bae6fd",padding:"12px 14px"}}>
-        <div style={{fontWeight:700,fontSize:13,color:"#0369a1",marginBottom:8}}>🏁 Welches Team startet wo?</div>
-        {plan.phases.filter(ph=>ph.stations).map((ph,pi)=>(
-          <div key={pi} style={{marginBottom:pi<plan.phases.filter(p=>p.stations).length-1?10:0}}>
-            {plan.phases.filter(p=>p.stations).length>1&&<div style={{fontSize:11,fontWeight:700,color:C.muted,marginBottom:5}}>{ph.block.label}</div>}
-            <div style={{display:"flex",flexDirection:"column",gap:5}}>
-              {ph.stations.map((st,si)=>(
-                <div key={si} style={{display:"flex",alignItems:"center",gap:8}}>
-                  <span style={{fontSize:12,fontWeight:700,minWidth:70,color:C.primary}}>📍 {st.label}</span>
-                  <select value={teamStationMap[`${pi}-${si}`]||""} onChange={e=>setTeamStationMap(m=>({...m,[`${pi}-${si}`]:e.target.value}))} style={{flex:1,padding:"5px 10px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,outline:"none"}}>
-                    <option value="">— Team zuweisen —</option>
-                    {planTeams.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}
-                  </select>
-                  {st.trainerName&&<span style={{fontSize:11,color:C.muted,whiteSpace:"nowrap"}}>🧑‍🏫 {st.trainerName}</span>}
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>}
-
-      <div style={{display:"flex",gap:8,justifyContent:"flex-end",flexWrap:"wrap",paddingTop:12,borderTop:`1px solid ${C.border}`}}>
-        <Btn onClick={()=>setPlan(null)} variant="secondary">✏️ Bearbeiten</Btn>
-        <Btn onClick={printPlan} variant="secondary">🖨️ PDF / Drucken</Btn>
-        <Btn onClick={()=>{
-          const exIds=[...new Set(plan.phases.flatMap(ph=>ph.stations?ph.stations.map(s=>s.exercise?.id).filter(Boolean):[ph.exercise?.id].filter(Boolean)))];
-          onSaveSession({id:replaceId||uid(),createdAt:now(),date:plan.date||todayISO(),duration:plan.totalMin,location:plan.location||"",weather:"",participantCount:String(plan.kids),coachIds:[],playerIds:[],exerciseIds:exIds,teams:planTeams,planData:{phases:plan.phases,kids:plan.kids,coaches:plan.coaches,totalMin:plan.totalMin,breakMin:plan.breakMin,teamStationMap:plan.teamStationMap,date:plan.date,location:plan.location},notes:`Manuell geplant: ${plan.phases.map(ph=>ph.block.label).join(" → ")}`});
-          toast("Training gespeichert ✓");
-          onClose();
-        }}><CalendarDays size={14}/> Speichern</Btn>
-      </div>
-    </div>
-  );
-
-  return(<div>
-    <div style={{background:"#f0f9ff",borderRadius:10,padding:"10px 14px",marginBottom:16,border:"1px solid #bae6fd",fontSize:13,color:"#0369a1"}}>
-      📋 Wähle Blöcke, Dauer und Anzahl – der Planer sucht passende Übungen aus deiner Bibliothek. Blöcke können parallel laufen (Kinder rotieren zwischen Stationen).
-    </div>
-
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10}}>
-      <div><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Kinder</label><Stepper value={kids} onChange={setKids} min={4} max={30}/></div>
-      <div><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Trainer</label><Stepper value={coaches} onChange={setCoaches} min={1} max={6}/></div>
-      <div><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Gesamt (Min)</label><Stepper value={totalMin} onChange={setTotalMin} min={20} max={120}/></div>
-    </div>
-    <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16,padding:"8px 14px",background:"#f8fafc",borderRadius:8,border:`1px solid ${C.border}`}}>
-      <span style={{fontSize:13,color:C.muted,flex:1}}>⏸ Pause zwischen Blöcken</span>
-      <Stepper value={breakMin} onChange={setBreakMin} min={0} max={10}/>
-      <span style={{fontSize:13,color:C.muted}}>Min</span>
-    </div>
-
-    <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
-      {blocks.map(b=><div key={b.key} style={{borderRadius:10,border:`1.5px solid ${b.active?C.primary:C.border}`,overflow:"hidden",opacity:b.active?1:.6}}>
-        <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:b.active?C.accentL:"#f8fafc",cursor:"pointer"}} onClick={()=>setBlock(b.key,"active",!b.active)}>
-          <div style={{color:b.active?C.primary:C.muted}}>{b.active?<CheckSquare size={18}/>:<Square size={18}/>}</div>
-          <span style={{fontSize:15,fontWeight:700,color:b.active?C.primary:C.text,flex:1}}>{b.emoji} {b.label}</span>
-          <div onClick={e=>e.stopPropagation()} style={{display:"flex",alignItems:"center",gap:4}}>
-            <div style={{display:"flex",alignItems:"center",border:`1.5px solid ${C.border}`,borderRadius:6,overflow:"hidden",height:30}}>
-              <button onClick={()=>setBlock(b.key,"minutes",Math.max(3,b.minutes-1))} style={{width:24,height:"100%",border:"none",cursor:"pointer",background:"#f1f5f9",fontSize:13,color:C.muted}}>−</button>
-              <div style={{width:36,textAlign:"center",fontWeight:800,fontSize:13,color:C.text}}>{b.minutes}</div>
-              <button onClick={()=>setBlock(b.key,"minutes",Math.min(60,b.minutes+1))} style={{width:24,height:"100%",border:"none",cursor:"pointer",background:"#f1f5f9",fontSize:13,color:C.text}}>+</button>
-            </div>
-            <span style={{fontSize:12,color:C.muted}}>Min</span>
-          </div>
-        </div>
-        {b.active&&<div style={{padding:"10px 14px",borderTop:`1px solid ${C.border}`}}>
-          {b.fixedFree
-            ?<div style={{fontSize:12,color:C.muted,fontStyle:"italic"}}>⚽ Freies Spiel — Trainer nutzen diese Zeit zum Aufbauen. Keine Übungsauswahl nötig.</div>
-            :<div>
-              <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",marginBottom:b.parallel?10:0}}>
-                <div style={{display:"flex",gap:6}}>
-                  {[["random","🎲 Zufällig"],["manual","📋 Manuell"]].map(([v,l])=>(
-                    <button key={v} onClick={()=>setBlock(b.key,"pick",v)} style={{padding:"4px 12px",borderRadius:20,border:`1.5px solid ${b.pick===v?C.primary:C.border}`,background:b.pick===v?C.accentL:"white",color:b.pick===v?C.primary:C.muted,cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>{l}</button>
-                  ))}
-                </div>
-                {b.pick==="manual"&&!b.parallel&&<select value={b.exerciseId||""} onChange={e=>setBlock(b.key,"exerciseId",e.target.value)} style={{flex:1,minWidth:140,padding:"5px 10px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,outline:"none"}}>
-                  <option value="">-- Übung wählen --</option>
-                  {exercises.sort((a,b)=>(CATS[a.category]?.label||"").localeCompare(CATS[b.category]?.label||"")).map(e=><option key={e.id} value={e.id}>{CATS[e.category]?.emoji||""} [{CATS[e.category]?.label||e.category}] {e.title}</option>)}
-                </select>}
-                <div style={{display:"flex",alignItems:"center",gap:8,marginLeft:"auto"}}>
-                  <input type="checkbox" id={`par${b.key}`} checked={b.parallel} onChange={e=>setBlock(b.key,"parallel",e.target.checked)} style={{width:15,height:15}}/>
-                  <label htmlFor={`par${b.key}`} style={{fontSize:12,fontWeight:700,color:C.muted,cursor:"pointer"}}>Parallel</label>
-                  {b.parallel&&<><span style={{fontSize:12,color:C.muted}}>Gruppen:</span>
-                  <div style={{display:"flex",alignItems:"center",border:`1.5px solid ${C.border}`,borderRadius:6,overflow:"hidden",height:28}}>
-                    <button onClick={()=>setBlock(b.key,"stations",Math.max(2,b.stations-1))} style={{width:22,height:"100%",border:"none",cursor:"pointer",background:"#f1f5f9",fontSize:12,color:C.muted}}>−</button>
-                    <div style={{width:28,textAlign:"center",fontWeight:800,fontSize:13,color:C.text}}>{b.stations}</div>
-                    <button onClick={()=>setBlock(b.key,"stations",Math.min(6,b.stations+1))} style={{width:22,height:"100%",border:"none",cursor:"pointer",background:"#f1f5f9",fontSize:12,color:C.text}}>+</button>
-                  </div></>}
-                </div>
-              </div>
-              {b.parallel&&<div style={{display:"flex",flexDirection:"column",gap:6,paddingTop:8,borderTop:`1px dashed ${C.border}`}}>
-                <div style={{fontSize:11,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:.6}}>Übung + Trainer pro Gruppe</div>
-                {Array.from({length:b.stations},(_,si)=>(
-                  <div key={si} style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                    <span style={{fontSize:12,fontWeight:800,color:C.primary,minWidth:64}}>Gruppe {si+1}</span>
-                    <select value={b.parallelExercises?.[si]||""} onChange={e=>setParallelEx(b.key,si,e.target.value)} style={{flex:2,minWidth:120,padding:"5px 8px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:12,outline:"none"}}>
-                      <option value="">🎲 Zufällig</option>
-                      {exercises.sort((a,b)=>(CATS[a.category]?.label||"").localeCompare(CATS[b.category]?.label||"")).map(e=><option key={e.id} value={e.id}>{CATS[e.category]?.emoji||""} [{CATS[e.category]?.label||e.category}] {e.title}</option>)}
-                    </select>
-                    {coachesList.length>0&&<select value={trainerAssignment[b.key]?.[si]||""} onChange={e=>setStationTrainer(b.key,si,e.target.value)} style={{flex:1,minWidth:80,padding:"5px 8px",border:`1.5px solid ${trainerAssignment[b.key]?.[si]?C.primary:C.border}`,borderRadius:8,fontSize:12,outline:"none",color:trainerAssignment[b.key]?.[si]?C.primary:C.muted}}>
-                      <option value="">🧑‍🏫 Trainer</option>
-                      {coachesList.filter(c=>c.active!==false).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
-                    </select>}
-                  </div>
-                ))}
-                <div style={{fontSize:11,color:"#7c3aed",fontStyle:"italic"}}>↔ Rotation nach {Math.floor(b.minutes/b.stations)} Min · {b.stations-1}× tauschen damit alle jede Gruppe hatten</div>
-              </div>}
-            </div>}
-        </div>}
-      </div>)}
-    </div>
-
-    <div style={{padding:"10px 14px",borderRadius:8,background:remaining>=0?"#f0fdf4":"#fef2f2",border:`1px solid ${remaining>=0?"#86efac":"#fca5a5"}`,marginBottom:16}}>
-      <div style={{fontSize:13,fontWeight:700,color:remaining>=0?"#166534":"#991b1b"}}>
-        {remaining>=0?`✓ ${usedMin} von ${totalMin} Min geplant (${remaining} Min Puffer)`:`⚠️ ${Math.abs(remaining)} Min zu viel – Blöcke kürzen`}
-      </div>
-      {breakCount>0&&<div style={{fontSize:11,color:remaining>=0?"#166534":"#991b1b",marginTop:2,opacity:.8}}>inkl. {breakCount}× {breakMin} Min Pause = {breakCount*breakMin} Min</div>}
-    </div>
-
-    <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
-      <Btn onClick={onClose} variant="secondary">Abbrechen</Btn>
-      <Btn onClick={generate} disabled={activeBlocks.length===0}><Dices size={14}/> Plan generieren</Btn>
-    </div>
-  </div>);
-}
 function SessionDetailView({s,players,coaches,exercises,onEdit,onDelete,onClose,onSaveSession,onReplan,onPrint}) {
   const gP=id=>players.find(p=>p.id===id);
   const gC=id=>coaches.find(c=>c.id===id);
@@ -3496,7 +2816,7 @@ function MeetingForm({m,onSave,onClose}) {
 }
 
 // ── KALENDER (vereinheitlichte Terminübersicht) ─────────────────
-function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,onSaveSession,onDeleteSession,onSavePlayer,onSaveMeeting,onDeleteMeeting,onSaveExercise,apiKey,toast,readOnly,onOpenTournament,pendingTarget,onClearPendingTarget,onlineUsers,currentUser,onGoHome,onGoBack}) {
+function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,onSaveSession,onDeleteSession,onSavePlayer,onSaveMeeting,onDeleteMeeting,onSaveTournament,onSaveExercise,apiKey,toast,readOnly,onOpenTournament,pendingTarget,onClearPendingTarget,onlineUsers,currentUser,onGoHome,onGoBack}) {
   const todayStr=todayISO();
   const [types,setTypes]=useState({training:true,spieltag:true,treffen:true});
   const [view,setView]=useState("list"); // list | month
@@ -3598,7 +2918,7 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
   };
 
   return(<div>
-    <PageHeader title="Kalender" sub={`${items.length} Termine`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
+    <PageHeader title="Termine" sub={`${items.length} Termine`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
     <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12,alignItems:"center",justifyContent:"space-between"}}>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
         {typeChip("training","Training","📅")}
@@ -3611,7 +2931,7 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
       </div>
     </div>
     {!readOnly&&<div style={{marginBottom:16}}>
-      <Btn variant="secondary" onClick={()=>setModal({type:"meetingForm",data:{id:uid(),title:"Trainertreff",date:todayISO(),location:"",agenda:[],createdBy:currentUser?.uid||"",createdByName:currentUser?.displayName||currentUser?.email||"",createdAt:now()}})}><Plus size={14}/> Neuer Trainertreff</Btn>
+      <Btn onClick={()=>setModal({type:"eventType"})}><Plus size={14}/> Neuer Termin</Btn>
     </div>}
     {items.length===0?<Empty icon="🗓" title="Noch keine Termine" sub="Trainings, Trainertreffen und Turniere erscheinen hier, sobald sie angelegt sind."/>:
       view==="list"?
@@ -3658,29 +2978,83 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
           <div style={{display:"flex",flexDirection:"column",gap:8}}>{selectedDayItems.map(renderItem)}</div>}
       </div>}
 
-    {modal?.type==="sessionDetail"&&modal.data&&<Modal title={fmtDate(modal.data.date)} onClose={()=>setModal(null)} wide><SessionDetailView s={modal.data} players={players} coaches={coaches} exercises={exercises} onEdit={()=>setModal({type:"sessionForm",data:modal.data})} onDelete={()=>{onDeleteSession(modal.data.id);setModal(null);}} onClose={()=>setModal(null)} onSaveSession={onSaveSession} onPrint={()=>printSession(modal.data,exercises,toast)} onReplan={()=>{const s=modal.data;setModal({type:"manual",replaceId:s.id,setup:{kids:Number(s.participantCount)||players.filter(p=>p.active).length,coachCount:s.coachIds?.length||1,duration:s.duration||60,location:s.location==="Halle"?"indoor":"outdoor",date:s.date,playerIds:s.playerIds||[],coachIds:s.coachIds||[],focus:"",planData:s.planData||null}});}}/></Modal>}
+    {modal?.type==="sessionDetail"&&modal.data&&<Modal title={fmtDate(modal.data.date)} onClose={()=>setModal(null)} wide><SessionDetailView s={modal.data} players={players} coaches={coaches} exercises={exercises} onEdit={()=>setModal({type:"sessionForm",data:modal.data})} onDelete={()=>{onDeleteSession(modal.data.id);setModal(null);}} onClose={()=>setModal(null)} onSaveSession={onSaveSession} onPrint={()=>printSession(modal.data,exercises,toast)} onReplan={()=>setModal({type:"setup",continueSessionId:modal.data.id})}/></Modal>}
     {modal?.type==="setup"&&<Modal title="Training planen" onClose={()=>setModal(null)} wide><NewTrainingWizard sessions={sessions} players={players} exercises={exercises} initialSessionId={modal.continueSessionId} startStep={modal.continueSessionId?2:1} onSaveSession={s=>{onSaveSession(s);setModal(null);toast("Training gespeichert");}} onSavePlayer={onSavePlayer} onClose={()=>setModal(null)}/></Modal>}
     {modal?.type==="sessionForm"&&<Modal title="Training bearbeiten" onClose={()=>setModal(null)} wide><SessionForm session={modal.data} players={players} coaches={coaches} exercises={exercises} onSave={s=>{onSaveSession(s);setModal(null);toast("Training gespeichert");}} onClose={()=>setModal(null)}/></Modal>}
-    {modal?.type==="manual"&&<Modal title="Manueller Trainingsplan" onClose={()=>setModal(null)} wide><ManualTrainingPlanner setup={modal.setup} exercises={exercises} players={players} coachesList={coaches} replaceId={modal.replaceId||null} onSaveSession={s=>{onSaveSession(s);setModal(null);toast("Training gespeichert");}} onSaveExercise={onSaveExercise} apiKey={apiKey} toast={toast} onClose={()=>setModal(null)}/></Modal>}
     {modal?.type==="meetingDetail"&&modal.data&&<Modal title={modal.data.title||"Trainertreff"} onClose={()=>setModal(null)} wide><MeetingCard m={modal.data} initialOpen onEdit={()=>setModal({type:"meetingForm",data:modal.data})} onDel={()=>{onDeleteMeeting(modal.data.id);setModal(null);}} onSave={m=>{onSaveMeeting(m);setModal({type:"meetingDetail",data:m});}} readOnly={readOnly}/></Modal>}
+    {modal?.type==="eventType"&&<Modal title="Neuer Termin" onClose={()=>setModal(null)}>
+      <div style={{fontSize:13,color:C.muted,marginBottom:16}}>Was für ein Termin soll angelegt werden?</div>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        <button onClick={()=>setModal({type:"setup"})} style={{display:"flex",alignItems:"center",gap:12,padding:"14px 16px",borderRadius:12,border:`1.5px solid ${C.border}`,background:C.card,cursor:"pointer",textAlign:"left",fontFamily:"inherit"}}>
+          <div style={{width:40,height:40,borderRadius:10,background:"#eff6ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>📅</div>
+          <div><div style={{fontWeight:800,fontSize:14,color:C.text}}>Training</div><div style={{fontSize:12,color:C.muted}}>Neue Trainingseinheit planen</div></div>
+        </button>
+        <button onClick={()=>setModal({type:"meetingForm",data:{id:uid(),title:"Trainertreff",date:todayISO(),location:"",agenda:[],createdBy:currentUser?.uid||"",createdByName:currentUser?.displayName||currentUser?.email||"",createdAt:now()}})} style={{display:"flex",alignItems:"center",gap:12,padding:"14px 16px",borderRadius:12,border:`1.5px solid ${C.border}`,background:C.card,cursor:"pointer",textAlign:"left",fontFamily:"inherit"}}>
+          <div style={{width:40,height:40,borderRadius:10,background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>🧑‍🏫</div>
+          <div><div style={{fontWeight:800,fontSize:14,color:C.text}}>Treffen</div><div style={{fontSize:12,color:C.muted}}>Neuer Trainertreff mit Agenda</div></div>
+        </button>
+        <button onClick={()=>setModal({type:"tournamentForm"})} style={{display:"flex",alignItems:"center",gap:12,padding:"14px 16px",borderRadius:12,border:`1.5px solid ${C.border}`,background:C.card,cursor:"pointer",textAlign:"left",fontFamily:"inherit"}}>
+          <div style={{width:40,height:40,borderRadius:10,background:"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>🏆</div>
+          <div><div style={{fontWeight:800,fontSize:14,color:C.text}}>Turnier</div><div style={{fontSize:12,color:C.muted}}>Neues Turnier / Spieltag anlegen</div></div>
+        </button>
+      </div>
+    </Modal>}
+    {modal?.type==="tournamentForm"&&<Modal title="Neues Turnier" onClose={()=>setModal(null)} wide><TournamentForm onSave={t=>{onSaveTournament(t);setModal(null);toast("Turnier erstellt");onOpenTournament(t.id);}} onClose={()=>setModal(null)}/></Modal>}
     {modal?.type==="meetingForm"&&<Modal title={meetings.find(x=>x.id===modal.data?.id)?"Trainertreff bearbeiten":"Neuer Trainertreff"} onClose={()=>setModal(null)} wide><MeetingForm m={modal.data} onSave={m=>{onSaveMeeting(m);setModal(null);toast("Trainertreff gespeichert");}} onClose={()=>setModal(null)}/></Modal>}
   </div>);
 }
 
 // ── TRAINING PAGE ─────────────────────────────────────────────────
-function TrainingPage({sessions,players,coaches,exercises,onSaveSession,onDeleteSession,onSavePlayer,apiKey,toast,onSaveExercise,pendingSetup,onClearPendingSetup,onlineUsers,currentUser,onGoHome,onGoBack,recurringSlots,onSaveSlot,onDeleteSlot,onGenerateSessions}) {
+function TrainingPage({sessions,players,coaches,exercises,onSaveSession,onDeleteSession,onSavePlayer,apiKey,toast,onSaveExercise,pendingSetup,onClearPendingSetup,onlineUsers,currentUser,onGoHome,onGoBack,onGoToCalendar,recurringSlots,onSaveSlot,onDeleteSlot,onGenerateSessions}) {
   const [modal,setModal]=useState(()=>pendingSetup?{type:"setup",setup:pendingSetup}:null);
   useEffect(()=>{if(pendingSetup){setModal({type:"setup",setup:pendingSetup});onClearPendingSetup?.();}},[]);
+  const [showSlots,setShowSlots]=useState(false);
+  const todayStr=todayISO();
+  const gP=id=>players.find(p=>p.id===id),gC=id=>coaches.find(c=>c.id===id),gE=id=>exercises.find(e=>e.id===id);
+  const next5=[...sessions].filter(s=>s.date>=todayStr).sort((a,b)=>a.date.localeCompare(b.date)||(a.time||"").localeCompare(b.time||"")).slice(0,5);
+
+  const renderRow=s=>{
+    const pr=(s.playerIds||[]).map(gP).filter(Boolean),ex=(s.exerciseIds||[]).map(gE).filter(Boolean);
+    const kids=s.participantCount?Number(s.participantCount):pr.length;
+    const planned=isSessionPlanned(s);
+    return(<div key={s.id} onClick={()=>setModal(planned?{type:"sessionDetail",data:s}:{type:"setup",continueSessionId:s.id})} style={{display:"flex",alignItems:"center",gap:10,background:C.card,borderRadius:12,border:`1.5px solid ${s.isDraft?"#fde047":C.border}`,padding:"12px 16px",cursor:"pointer",marginBottom:8}}>
+      <div style={{width:40,height:40,borderRadius:10,background:"#eff6ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>📅</div>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontWeight:800,fontSize:14,color:C.text,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          {fmtDate(s.date)}{s.time?` · ${s.time} Uhr`:""}
+          <span style={{fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:20,background:planned?"#dcfce7":"#fef3c7",color:planned?"#16a34a":"#b45309"}}>{planned?"✅ Geplant":"🕒 Ungeplant"}</span>
+        </div>
+        <div style={{fontSize:12,color:C.muted,marginTop:2}}>⏱ {s.duration} Min{kids>0?` · 👥 ${kids}`:""}{s.location?` · 📍 ${s.location}`:""}{ex.length>0?` · ${ex.length} Übung${ex.length!==1?"en":""}`:""}</div>
+      </div>
+    </div>);
+  };
+
   return(<div>
-    <PageHeader title="Training" sub="Serientermine & neue Trainings" onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
-    <div style={{background:"#f0f9ff",borderRadius:10,padding:"10px 14px",marginBottom:16,border:"1px solid #bae6fd",fontSize:13,color:"#0369a1"}}>📅 Eine Übersicht aller Trainingstermine findest du im Kalender.</div>
+    <PageHeader title="Training" sub="Nächste Trainings & Serientermine" onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
     <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
       <Btn onClick={()=>setModal({type:"notfall"})} style={{background:"#dc2626",color:"white"}} sm><AlertTriangle size={14}/> SOS</Btn>
       <Btn onClick={()=>setModal({type:"setup"})}><CalendarDays size={16}/> Neues Training</Btn>
     </div>
-    <RecurringSlotsTab slots={recurringSlots||[]} sessions={sessions} onSaveSlot={onSaveSlot} onDeleteSlot={onDeleteSlot} onGenerateSessions={onGenerateSessions} toast={toast}/>
+
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:10}}>
+      <div style={{fontWeight:800,fontSize:15,color:C.text}}>Nächste Trainings</div>
+      {onGoToCalendar&&<button onClick={onGoToCalendar} style={{background:"none",border:"none",color:C.primary,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>Alle anzeigen →</button>}
+    </div>
+    {next5.length===0?<div style={{color:C.muted,fontSize:13,marginBottom:20}}>Keine anstehenden Trainings.</div>:
+      <div style={{marginBottom:24}}>{next5.map(renderRow)}</div>}
+
+    <div style={{borderTop:`1px solid ${C.border}`,paddingTop:14}}>
+      <button onClick={()=>setShowSlots(v=>!v)} style={{display:"flex",alignItems:"center",gap:6,background:"none",border:"none",cursor:"pointer",padding:0,marginBottom:showSlots?12:0}}>
+        <span style={{fontSize:11,color:C.muted}}>{showSlots?"▼":"▶"}</span>
+        <span style={{fontSize:13,fontWeight:700,color:C.muted}}>🔁 Feste Wochentermine (Serientermine)</span>
+      </button>
+      {showSlots&&<RecurringSlotsTab slots={recurringSlots||[]} sessions={sessions} onSaveSlot={onSaveSlot} onDeleteSlot={onDeleteSlot} onGenerateSessions={onGenerateSessions} toast={toast}/>}
+    </div>
+
     {modal?.type==="notfall"&&<Modal title="🚨 SOS-Notfall-Plan" onClose={()=>setModal(null)} wide><NotfallModal exercises={exercises} onClose={()=>setModal(null)}/></Modal>}
-    {modal?.type==="setup"&&<Modal title="Neues Training" onClose={()=>setModal(null)} wide><NewTrainingWizard sessions={sessions} players={players} exercises={exercises} initialSetup={modal.setup} onSaveSession={s=>{onSaveSession(s);setModal(null);toast("Training gespeichert");}} onSavePlayer={onSavePlayer} onClose={()=>setModal(null)}/></Modal>}
+    {modal?.type==="setup"&&<Modal title="Training planen" onClose={()=>setModal(null)} wide><NewTrainingWizard sessions={sessions} players={players} exercises={exercises} initialSetup={modal.setup} initialSessionId={modal.continueSessionId} startStep={modal.continueSessionId?2:1} onSaveSession={s=>{onSaveSession(s);setModal(null);toast("Training gespeichert");}} onSavePlayer={onSavePlayer} onClose={()=>setModal(null)}/></Modal>}
+    {modal?.type==="sessionDetail"&&modal.data&&<Modal title={fmtDate(modal.data.date)} onClose={()=>setModal(null)} wide><SessionDetailView s={modal.data} players={players} coaches={coaches} exercises={exercises} onEdit={()=>setModal({type:"sessionForm",data:modal.data})} onDelete={()=>{onDeleteSession(modal.data.id);setModal(null);}} onClose={()=>setModal(null)} onSaveSession={onSaveSession} onPrint={()=>printSession(modal.data,exercises,toast)} onReplan={()=>setModal({type:"setup",continueSessionId:modal.data.id})}/></Modal>}
+    {modal?.type==="sessionForm"&&<Modal title="Training bearbeiten" onClose={()=>setModal(null)} wide><SessionForm session={modal.data} players={players} coaches={coaches} exercises={exercises} onSave={s=>{onSaveSession(s);setModal(null);}} onClose={()=>setModal(null)}/></Modal>}
   </div>);
 }
 
@@ -3857,10 +3231,6 @@ function NewTrainingWizard({sessions,players,exercises,initialSetup,initialSessi
 
     {step===3&&<div>
       <div style={{fontSize:12,color:C.muted,marginBottom:10}}>(optional – Teams können hier direkt für das Training gebildet werden. „Schließen" überspringt diesen Schritt.)</div>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:8}}>
-        <button onClick={()=>setStep(2)} style={{background:"none",border:"none",color:C.primary,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit",padding:0}}>← Zurück zur Spielerauswahl</button>
-        <Btn sm variant="secondary" onClick={finish}><CheckSquare size={13}/> Training speichern & schließen</Btn>
-      </div>
       <TeamBuilderModal availablePlayers={teamBuilderPlayers} onSaveTeams={(t)=>{setTeams(t);setStep(4);}} onClose={()=>setStep(4)}/>
     </div>}
 
@@ -3880,19 +3250,18 @@ function NewTrainingWizard({sessions,players,exercises,initialSetup,initialSessi
       {sortedEx.length===0&&<span style={{color:C.muted,fontSize:13}}>Noch keine Übungen in der Bibliothek</span>}
     </div>}
 
-    {step!==3&&<div style={{borderTop:`1px solid ${C.border}`,marginTop:18,paddingTop:16,display:"flex",gap:10,flexWrap:"wrap"}}>
-      {step===1?<Btn onClick={onClose} variant="secondary">Abbrechen</Btn>:<Btn onClick={()=>setStep(step-1)} variant="secondary">← Zurück</Btn>}
-      <div style={{flex:1}}/>
-      {step<4&&<Btn onClick={finish} variant="secondary"><CheckSquare size={14}/> Speichern &amp; schließen</Btn>}
-      {step<4?<Btn onClick={()=>setStep(step+1)}>Weiter →</Btn>:<Btn onClick={finish}><CheckSquare size={14}/> Training abschließen</Btn>}
-    </div>}
+    <div style={{borderTop:`1px solid ${C.border}`,marginTop:18,paddingTop:16,display:"flex",gap:8,flexWrap:"nowrap"}}>
+      {step===1?<Btn onClick={onClose} variant="secondary" sm style={{flex:1,justifyContent:"center"}}>Abbrechen</Btn>:<Btn onClick={()=>setStep(step-1)} variant="secondary" sm style={{flex:1,justifyContent:"center"}}>← Zurück</Btn>}
+      {step<4&&<Btn onClick={finish} variant="secondary" sm style={{flex:1,justifyContent:"center"}}><CheckSquare size={13}/> Speichern</Btn>}
+      {step<4?<Btn onClick={()=>setStep(step+1)} sm style={{flex:1,justifyContent:"center"}}>Weiter →</Btn>:<Btn onClick={finish} sm style={{flex:1,justifyContent:"center"}}><CheckSquare size={13}/> Fertig</Btn>}
+    </div>
   </div>);
 }
 
 
 // ── TURNIER PAGE ──────────────────────────────────────────────────
 function TournamentForm({onSave,onClose}) {
-  const [form,setForm]=useState({name:"",date:todayISO(),matchDuration:8,fields:1,notes:"",defaultTeamSize:4,defaultPause:2,startTime:"10:00"});
+  const [form,setForm]=useState({name:"",date:todayISO(),location:"",opponent:"",surface:"",hosting:"self",matchDuration:8,fields:1,notes:"",defaultTeamSize:4,defaultPause:2,startTime:"10:00",planLink:"",planFileData:null,planFileName:"",planFileType:""});
   // Club setup: {name, count}
   const [clubs,setClubs]=useState([{id:uid(),name:"",count:1}]);
   // Derived teams (generated from clubs)
@@ -3900,8 +3269,20 @@ function TournamentForm({onSave,onClose}) {
   const [excludePairs,setExcludePairs]=useState([]);
   const [clubOverrides,setClubOverrides]=useState([]);
   const [showExclusions,setShowExclusions]=useState(false);
-  const [step,setStep]=useState("clubs"); // clubs | teams
+  const [step,setStep]=useState("general"); // general | clubs | teams | external
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+
+  const handlePlanFile=e=>{
+    const file=e.target.files?.[0];
+    if(!file)return;
+    const reader=new FileReader();
+    reader.onload=()=>setForm(f=>({...f,planFileData:reader.result,planFileName:file.name,planFileType:file.type}));
+    reader.readAsDataURL(file);
+  };
+  const saveExternal=()=>{
+    if(!form.name.trim())return;
+    onSave({...form,id:uid(),createdAt:now(),teams:[],matches:[],excludePairs:[],clubOverrides:[]});
+  };
 
   // Generate teams from clubs
   const buildTeamsFromClubs=()=>{
@@ -3948,13 +3329,61 @@ function TournamentForm({onSave,onClose}) {
   };
   const allExcluded=[...excludePairs,...sameClubPairs];
 
+  // STEP 0: Allgemeine Fragen + wer richtet aus
+  if(step==="general") return(<div>
+    <Inp label="Turniername *" value={form.name} onChange={e=>set("name",e.target.value)} placeholder="z.B. Herbstturnier"/>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+      <Inp label="Datum" type="date" value={form.date} onChange={e=>set("date",e.target.value)}/>
+      <Inp label="Uhrzeit" type="time" value={form.startTime} onChange={e=>set("startTime",e.target.value)}/>
+    </div>
+    <Inp label="Ort" value={form.location} onChange={e=>set("location",e.target.value)} placeholder="z.B. Sportplatz Schanzenstraße"/>
+    <Inp label="Gegen wen / teilnehmende Vereine" value={form.opponent} onChange={e=>set("opponent",e.target.value)} placeholder="z.B. SC Sternschanze, FC Falke, ..."/>
+    <Sel label="Untergrund" value={form.surface} onChange={e=>set("surface",e.target.value)}>
+      <option value="">– auswählen –</option>
+      <option value="rasen">Rasen</option>
+      <option value="kunstrasen">Kunstrasen</option>
+      <option value="halle">Halle</option>
+      <option value="asche">Asche</option>
+    </Sel>
+    <Txta label="Notizen (optional)" value={form.notes} onChange={e=>set("notes",e.target.value)} rows={2}/>
+
+    <div style={{marginTop:4,marginBottom:16}}>
+      <label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:8,textTransform:"uppercase",letterSpacing:.6}}>Wer richtet das Turnier aus?</label>
+      <div style={{display:"flex",gap:8}}>
+        {[["self","🏠 Wir selbst"],["other","🤝 Anderer Verein"]].map(([v,l])=><button key={v} onClick={()=>set("hosting",v)} style={{flex:1,padding:"10px 8px",borderRadius:8,border:`2px solid ${form.hosting===v?C.primary:C.border}`,background:form.hosting===v?C.accentL:"white",color:form.hosting===v?C.primary:C.muted,cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"inherit"}}>{l}</button>)}
+      </div>
+      <div style={{fontSize:12,color:C.muted,marginTop:6}}>{form.hosting==="self"?"Du planst Teams, Spielplan und Ergebnisse selbst.":"Du hinterlegst den Turnierplan des ausrichtenden Vereins (Link, PDF oder Foto)."}</div>
+    </div>
+
+    <div style={{display:"flex",gap:10,justifyContent:"flex-end",paddingTop:16,borderTop:`1px solid ${C.border}`}}>
+      <Btn onClick={onClose} variant="secondary">Abbrechen</Btn>
+      <Btn onClick={()=>setStep(form.hosting==="self"?"clubs":"external")} disabled={!form.name.trim()}>Weiter →</Btn>
+    </div>
+  </div>);
+
+  // STEP EXTERNAL: Turnierplan als Link/PDF/Foto hinterlegen
+  if(step==="external") return(<div>
+    <div style={{background:"#f8fafc",borderRadius:8,border:`1px solid ${C.border}`,padding:"10px 14px",marginBottom:16,fontSize:13,color:C.muted}}>Hinterlege den Turnierplan des ausrichtenden Vereins – als Link, PDF oder Foto.</div>
+    <Inp label="Link zum Turnierplan (optional)" value={form.planLink} onChange={e=>set("planLink",e.target.value)} placeholder="https://..."/>
+    <div style={{marginBottom:16}}>
+      <label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:8,textTransform:"uppercase",letterSpacing:.6}}>PDF oder Foto hochladen (optional)</label>
+      <input type="file" accept="application/pdf,image/*" onChange={handlePlanFile} style={{fontSize:13,fontFamily:"inherit"}}/>
+      {form.planFileName&&<div style={{fontSize:12,color:C.primary,marginTop:8,fontWeight:600}}>📎 {form.planFileName}</div>}
+    </div>
+    <div style={{display:"flex",gap:10,justifyContent:"flex-end",paddingTop:16,borderTop:`1px solid ${C.border}`}}>
+      <Btn onClick={()=>setStep("general")} variant="secondary">← Zurück</Btn>
+      <Btn onClick={saveExternal}><CheckSquare size={14}/> Turnier speichern</Btn>
+    </div>
+  </div>);
+
   // STEP 1: Club setup
   if(step==="clubs") return(<div>
-    <Inp label="Turniername *" value={form.name} onChange={e=>set("name",e.target.value)} placeholder="z.B. Herbstturnier"/>
+    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
+      <button onClick={()=>setStep("general")} style={{padding:"5px 10px",borderRadius:8,border:`1px solid ${C.border}`,background:"white",cursor:"pointer",fontFamily:"inherit",fontSize:13,color:C.muted}}>← Zurück</button>
+      <div style={{fontWeight:800,fontSize:16,color:C.text,flex:1}}>{form.name}</div>
+    </div>
     <div style={{marginBottom:14}}>
-      <Inp label="Datum" type="date" value={form.date} onChange={e=>set("date",e.target.value)}/>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-        <div><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Startzeit</label><input type="time" value={form.startTime} onChange={e=>set("startTime",e.target.value)} style={{width:"100%",padding:"8px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:14,outline:"none",fontFamily:"inherit"}}/></div>
         <div><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Spieldauer (Min)</label><Stepper value={form.matchDuration} onChange={v=>set("matchDuration",v)} min={3} max={30}/></div>
         <div><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Felder</label><Stepper value={form.fields} onChange={v=>set("fields",v)} min={1} max={6}/></div>
         <div><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Kinder/Team</label><Stepper value={form.defaultTeamSize} onChange={v=>set("defaultTeamSize",v)} min={1} max={12}/></div>
@@ -3986,7 +3415,6 @@ function TournamentForm({onSave,onClose}) {
         <div style={{fontSize:11,color:C.muted,marginTop:6}}>{buildTeamsFromClubs().length} Teams · {buildTeamsFromClubs().length*(buildTeamsFromClubs().length-1)/2} mögliche Spiele</div>
       </div>}
     </div>
-    <Txta label="Notizen" value={form.notes} onChange={e=>set("notes",e.target.value)} rows={2}/>
     <div style={{display:"flex",gap:10,justifyContent:"flex-end",paddingTop:16,borderTop:`1px solid ${C.border}`}}>
       <Btn onClick={onClose} variant="secondary">Abbrechen</Btn>
       <Btn onClick={goToTeams} disabled={!form.name.trim()||buildTeamsFromClubs().length<2}>Weiter →</Btn>
@@ -4236,13 +3664,30 @@ function TournamentDetail({tournament:t,onUpdate,onBack,coaches=[],toast}) {
     toast?.("Rückrunde erstellt ✓");
   };
 
+  const SURFACE_LABELS={rasen:"Rasen",kunstrasen:"Kunstrasen",halle:"Halle",asche:"Asche"};
   return(<div>
     <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20,flexWrap:"wrap"}}>
       <button onClick={onBack} style={{background:"none",border:"none",cursor:"pointer",color:C.muted,fontSize:14,display:"flex",alignItems:"center",gap:4}}>← Zurück</button>
-      <div style={{flex:1}}><h2 style={{margin:0,fontSize:20,fontWeight:900,color:C.text}}>{t.name}</h2><div style={{fontSize:13,color:C.muted}}>{fmtDate(t.date)} · {t.teams.length} Teams · {played}/{t.matches.length} Spiele · {t.matchDuration} Min/Spiel{hasRueckrunde?" · 🔁 Hin- & Rückrunde":""}</div></div>
-      {!hasRueckrunde&&<Btn sm variant="secondary" onClick={()=>setRueckrundeModal(true)}>🔁 Rückrunde erstellen</Btn>}
-      <Btn sm variant="secondary" onClick={printTournament}>🖨️ Turnierplan PDF</Btn>
+      <div style={{flex:1}}><h2 style={{margin:0,fontSize:20,fontWeight:900,color:C.text}}>{t.name}</h2><div style={{fontSize:13,color:C.muted}}>{t.hosting==="other"?`${fmtDate(t.date)}${t.location?` · 📍 ${t.location}`:""}${t.opponent?` · ⚽ ${t.opponent}`:""}`:`${fmtDate(t.date)} · ${t.teams.length} Teams · ${played}/${t.matches.length} Spiele · ${t.matchDuration} Min/Spiel${hasRueckrunde?" · 🔁 Hin- & Rückrunde":""}`}</div></div>
+      {t.hosting!=="other"&&!hasRueckrunde&&<Btn sm variant="secondary" onClick={()=>setRueckrundeModal(true)}>🔁 Rückrunde erstellen</Btn>}
+      {t.hosting!=="other"&&<Btn sm variant="secondary" onClick={printTournament}>🖨️ Turnierplan PDF</Btn>}
     </div>
+    {t.hosting==="other"?(
+      <div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"16px 18px"}}>
+        <div style={{fontSize:13,color:C.muted,marginBottom:12}}>🤝 Dieses Turnier wird von einem anderen Verein ausgerichtet.</div>
+        {t.surface&&<div style={{fontSize:14,marginBottom:6,color:C.text}}>🌱 Untergrund: {SURFACE_LABELS[t.surface]||t.surface}</div>}
+        {t.notes&&<div style={{fontSize:13,color:C.muted,marginTop:8,fontStyle:"italic"}}>{t.notes}</div>}
+        <div style={{marginTop:14,paddingTop:14,borderTop:`1px solid ${C.border}`}}>
+          <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>Turnierplan</div>
+          {t.planLink&&<div style={{marginBottom:8}}><a href={t.planLink} target="_blank" rel="noopener noreferrer" style={{color:C.primary,fontWeight:700,fontSize:14}}>🔗 {t.planLink}</a></div>}
+          {t.planFileData&&<div>
+            {t.planFileType?.startsWith("image/")?<img src={t.planFileData} alt="Turnierplan" style={{maxWidth:"100%",borderRadius:8,border:`1px solid ${C.border}`}}/>:
+              <a href={t.planFileData} download={t.planFileName||"Turnierplan.pdf"} style={{color:C.primary,fontWeight:700,fontSize:14}}>📎 {t.planFileName||"Datei öffnen"}</a>}
+          </div>}
+          {!t.planLink&&!t.planFileData&&<div style={{fontSize:13,color:C.muted,fontStyle:"italic"}}>Noch kein Turnierplan hinterlegt.</div>}
+        </div>
+      </div>
+    ):(<>
     {rueckrundeModal&&<Modal title="Rückrunde erstellen" onClose={()=>setRueckrundeModal(false)} wide><RueckrundeForm teams={t.teams} baseExcludePairs={t.excludePairs||[]} baseClubOverrides={t.clubOverrides||[]} onSave={createRueckrunde} onClose={()=>setRueckrundeModal(false)}/></Modal>}
     <div style={{display:"flex",gap:4,background:"#f1f5f9",borderRadius:10,padding:4,marginBottom:20,width:"fit-content",flexWrap:"wrap"}}>{tb("plan","Spielplan")}{tb("teams","Teams")}{tb("schedule","Zeitplan")}{tb("uebersicht","Übersicht")}{tb("table","Tabelle")}</div>
     {tab==="plan"&&<div style={{display:"flex",flexDirection:"column",gap:8}}>
@@ -4425,6 +3870,7 @@ function TournamentDetail({tournament:t,onUpdate,onBack,coaches=[],toast}) {
       </div>
       <div style={{fontSize:12,color:C.muted,marginTop:8,textAlign:"center"}}>{played}/{t.matches.length} Spiele</div>
     </div>}
+    </>)}
   </div>);
 }
 
@@ -5155,7 +4601,7 @@ function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets
   ].sort((a,b)=>a.date.localeCompare(b.date)).slice(0,10);
 
   const teasers=[
-    can(role,"calendar")&&{icon:"🗓",title:"Kalender",sub:"Alle Termine",onClick:()=>onNavigate("calendar")},
+    can(role,"calendar")&&{icon:"🗓",title:"Termine",sub:"Alle Termine",onClick:()=>onNavigate("calendar")},
     can(role,"training")&&{icon:"📅",title:"Neues Training",sub:nextSession?relDateLabel(nextSession.date):"Neue Einheit",onClick:()=>onNavigate("training")},
     {icon:"👥",title:"Team",sub:`${activePlayers.length} Spieler`,onClick:()=>onNavigate("team")},
     can(role,"teamplaner")&&{icon:"🔀",title:"Teams losen",sub:`${(teamsets||[]).length} gespeichert`,onClick:()=>onNavigate("teamplaner")},
@@ -5259,7 +4705,7 @@ function Nav({page,setPage,counts}) {
 
   const allItems=[
     {key:"start",    icon:Home,      label:"Start"},
-    {key:"calendar", icon:Clock,     label:"Kalender"},
+    {key:"calendar", icon:Clock,     label:"Termine"},
     {key:"library",  icon:BookOpen,  label:"Bibliothek", count:counts.exercises},
     {key:"team",     icon:Users,     label:"Team",        count:counts.players},
     {key:"training", icon:CalendarDays,label:"Training",  count:counts.sessions},
@@ -5270,7 +4716,7 @@ function Nav({page,setPage,counts}) {
     {key:"settings", icon:Settings,  label:"Einstellungen",alert:counts.pendingCount>0},
   ];
   const visible=allItems.filter(i=>can(counts.role,i.key)||(i.key==="settings"&&(counts.role==="trainer"||counts.role==="eltern")));
-  const MAIN_KEYS=["start","calendar","library","training","teamplaner"];
+  const MAIN_KEYS=["start","calendar","training","teamplaner"];
   const mainItems=visible.filter(i=>MAIN_KEYS.includes(i.key));
   const moreItems=visible.filter(i=>!MAIN_KEYS.includes(i.key));
   const moreActive=moreItems.some(i=>i.key===page);
@@ -5902,9 +5348,9 @@ export default function App() {
       {page==="team"     &&<TeamPage     players={players} coaches={coaches} sessions={sessions} onSaveSession={saveSe} onSavePlayer={can(role,"editAnything")?savePl:null} onDeletePlayer={can(role,"editAnything")?id=>{const i=players.find(p=>p.id===id);setPlayers(prev=>prev.filter(p=>p.id!==id));showUndo("Spieler",i,()=>setPlayers(prev=>[i,...prev]));}:null} onSaveCoach={can(role,"editAnything")?saveCo:null} onDeleteCoach={can(role,"editAnything")?id=>{const i=coaches.find(c=>c.id===id);setCoaches(prev=>prev.filter(c=>c.id!==id));showUndo("Trainer",i,()=>setCoaches(prev=>[i,...prev]));}:null} toast={toast} showStrength={can(role,"seeStrength")} readOnly={!can(role,"editAnything")} onAddToTraining={can(role,"editAnything")?({playerIds,coachIds,kids,coachCount})=>{setPendingSetup({playerIds,coachIds,kids:kids||playerIds.length,coachCount:coachCount||1,date:todayISO(),location:"outdoor",focus:""});setPage("training");}:null} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="orga"&&can(role,"orga")&&<OrgaPage todos={todos} onSaveTodo={saveTodo} onDeleteTodo={id=>{const i=todos.find(t=>t.id===id);setTodos(prev=>prev.filter(t=>t.id!==id));showUndo("Task",i,()=>setTodos(prev=>[i,...prev]));}} coaches={coaches} currentUser={user} toast={toast} showUndo={showUndo} readOnly={!can(role,"editAnything")} onlineUsers={onlineUsers} pendingTarget={pendingOrgaTarget} onClearPendingTarget={()=>setPendingOrgaTarget(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="teamplaner"&&<TeamplanerPage players={players} teamsets={teamsets} onSaveTeamset={can(role,"editAnything")?saveTSets:null} onDeleteTeamset={can(role,"editAnything")?id=>{const i=teamsets.find(t=>t.id===id);setTeamsets(prev=>prev.filter(t=>t.id!==id));showUndo("Team-Aufstellung",i,()=>setTeamsets(prev=>[i,...prev]));}:null} readOnly={!can(role,"editAnything")} showStrength={can(role,"seeStrength")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
-      {page==="training" &&<TrainingPage sessions={sessions} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} apiKey={apiKey} toast={toast} onSaveExercise={saveEx} pendingSetup={pendingSetup} onClearPendingSetup={()=>setPendingSetup(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} recurringSlots={recurringSlots} onSaveSlot={saveSlot} onDeleteSlot={id=>{const i=recurringSlots.find(s=>s.id===id);setRecurringSlots(prev=>prev.filter(s=>s.id!==id));showUndo("Serientermin",i,()=>setRecurringSlots(prev=>[i,...prev]));}} onGenerateSessions={generateSessions}/>}
+      {page==="training" &&<TrainingPage sessions={sessions} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} apiKey={apiKey} toast={toast} onSaveExercise={saveEx} pendingSetup={pendingSetup} onClearPendingSetup={()=>setPendingSetup(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} onGoToCalendar={()=>setPage("calendar")} recurringSlots={recurringSlots} onSaveSlot={saveSlot} onDeleteSlot={id=>{const i=recurringSlots.find(s=>s.id===id);setRecurringSlots(prev=>prev.filter(s=>s.id!==id));showUndo("Serientermin",i,()=>setRecurringSlots(prev=>[i,...prev]));}} onGenerateSessions={generateSessions}/>}
       {page==="turnier"  &&<TurnierPage  tournaments={tournaments} onSaveTournament={saveTo} onDeleteTournament={id=>{const i=tournaments.find(t=>t.id===id);setTournaments(prev=>prev.filter(t=>t.id!==id));showUndo("Turnier",i,()=>setTournaments(prev=>[i,...prev]));}} coaches={coaches} onlineUsers={onlineUsers} currentUser={user} toast={toast} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} initialOpenId={pendingTurnierId} onClearInitialOpen={()=>setPendingTurnierId(null)}/>}
-      {page==="calendar" &&<CalendarPage sessions={sessions} meetings={meetings} tournaments={tournaments} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} onSaveMeeting={saveMeeting} onDeleteMeeting={id=>{const i=meetings.find(m=>m.id===id);setMeetings(prev=>prev.filter(m=>m.id!==id));showUndo("Trainertreff",i,()=>setMeetings(prev=>[i,...prev]));}} onSaveExercise={saveEx} apiKey={apiKey} toast={toast} readOnly={!can(role,"editAnything")} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} pendingTarget={pendingCalendarTarget} onClearPendingTarget={()=>setPendingCalendarTarget(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="calendar" &&<CalendarPage sessions={sessions} meetings={meetings} tournaments={tournaments} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} onSaveMeeting={saveMeeting} onDeleteMeeting={id=>{const i=meetings.find(m=>m.id===id);setMeetings(prev=>prev.filter(m=>m.id!==id));showUndo("Trainertreff",i,()=>setMeetings(prev=>[i,...prev]));}} onSaveTournament={saveTo} onSaveExercise={saveEx} apiKey={apiKey} toast={toast} readOnly={!can(role,"editAnything")} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} pendingTarget={pendingCalendarTarget} onClearPendingTarget={()=>setPendingCalendarTarget(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="kasse"    &&can(role,"kasse")&&<KassePage kassenbuch={kassenbuch} onSave={can(role,"editKasse")?saveKa:null} onDelete={can(role,"editKasse")?id=>{const i=kassenbuch.find(k=>k.id===id);setKassenbuch(prev=>prev.filter(k=>k.id!==id));showUndo("Eintrag",i,()=>setKassenbuch(prev=>[i,...prev]));}:null} readOnly={!can(role,"editKasse")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {(can(role,"settings")||role==="trainer"||role==="eltern")&&page==="settings"&&<SettingsPage exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={setCurrentGroupId} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
     </main>
