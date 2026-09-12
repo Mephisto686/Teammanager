@@ -414,7 +414,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.21.0";
+const APP_VERSION = "3.22.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -1861,43 +1861,8 @@ function NotfallModal({exercises,onClose}) {
   </div>);
 }
 
-// ── SESSION FORM ──────────────────────────────────────────────────
-function SessionForm({session,players,coaches,exercises,onSave,onClose}) {
-  const [form,setForm]=useState({date:todayISO(),duration:60,location:"",weather:"",participantCount:"",coachIds:[],playerIds:[],exerciseIds:[],teams:[],notes:"",...session});
-  const [showPlayers,setShowPlayers]=useState((session?.playerIds||[]).length>0);
-  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
-  const tog=(k,id)=>set(k,form[k].includes(id)?form[k].filter(x=>x!==id):[...form[k],id]);
-  const ms=(items,sel,toggle,label,render)=><div style={{marginBottom:14}}><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>{label}</label><div style={{display:"flex",flexWrap:"wrap",gap:6,padding:10,background:"#f8fafc",borderRadius:8,border:`1.5px solid ${C.border}`,maxHeight:120,overflowY:"auto"}}>{items.map(item=><button key={item.id} onClick={()=>toggle(item.id)} style={{padding:"4px 12px",borderRadius:20,border:`1.5px solid ${sel.includes(item.id)?C.primary:C.border}`,background:sel.includes(item.id)?C.accentL:"white",color:sel.includes(item.id)?C.primary:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,fontFamily:"inherit"}}>{render(item)}</button>)}{items.length===0&&<span style={{color:C.muted,fontSize:13}}>Keine vorhanden</span>}</div></div>;
-  return(<div>
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}><Inp label="Datum" type="date" value={form.date} onChange={e=>set("date",e.target.value)}/><Inp label="Dauer (Min)" type="number" value={form.duration} onChange={e=>set("duration",Number(e.target.value))} min={15}/></div>
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}><Inp label="Ort" value={form.location} onChange={e=>set("location",e.target.value)} placeholder="Sportplatz..."/><Inp label="Wetter" value={form.weather} onChange={e=>set("weather",e.target.value)} placeholder="Sonnig, 18°C..."/></div>
-    <div style={{marginBottom:14}}>
-      <div style={{background:"#fffbeb",borderRadius:8,border:"1px solid #fde68a",padding:"10px 14px",display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
-        <div style={{flex:1,minWidth:140}}><label style={{display:"block",fontSize:12,fontWeight:700,color:"#92400e",marginBottom:4}}>ANZAHL KINDER (schnell)</label><input type="number" min={0} value={form.participantCount} onChange={e=>set("participantCount",e.target.value)} placeholder="z.B. 12" style={{width:"100%",padding:"7px 10px",border:"1.5px solid #fde68a",borderRadius:8,fontSize:15,fontWeight:700,outline:"none",boxSizing:"border-box"}}/></div>
-        <div style={{fontSize:12,color:"#92400e"}}>Oder spezifische<br/>Spieler unten wählen</div>
-      </div>
-    </div>
-    {ms(coaches.filter(c=>c.active!==false),form.coachIds,id=>tog("coachIds",id),"Trainer",c=>c.name)}
-    <div style={{marginBottom:14}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-        <label style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:.6}}>Spieler ({form.playerIds.length}) <span style={{fontWeight:400,textTransform:"none",letterSpacing:0}}>– optional</span></label>
-        <div style={{display:"flex",gap:6}}>
-          <Btn sm variant="secondary" onClick={()=>setShowPlayers(v=>!v)}>{showPlayers?"▲ Einklappen":"▼ Ausklappen"}</Btn>
-          {showPlayers&&<><Btn sm variant="secondary" onClick={()=>set("playerIds",players.filter(p=>p.active).map(p=>p.id))}>Alle</Btn><Btn sm variant="secondary" onClick={()=>set("playerIds",[])}>Keine</Btn></>}
-        </div>
-      </div>
-      {showPlayers&&<div style={{display:"flex",flexWrap:"wrap",gap:6,padding:10,background:"#f8fafc",borderRadius:8,border:`1.5px solid ${C.border}`,maxHeight:130,overflowY:"auto"}}>
-        {players.filter(p=>p.active).map(p=><button key={p.id} onClick={()=>tog("playerIds",p.id)} style={{padding:"4px 12px",borderRadius:20,border:`1.5px solid ${form.playerIds.includes(p.id)?STR[p.strength].color:C.border}`,background:form.playerIds.includes(p.id)?STR[p.strength].light:"white",color:form.playerIds.includes(p.id)?STR[p.strength].color:C.muted,cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"inherit"}}>{STR[p.strength].emoji} {p.name}</button>)}
-      </div>}
-    </div>
-    {ms(exercises,form.exerciseIds,id=>tog("exerciseIds",id),"Verwendete Übungen",e=>`${CATS[e.category]?.emoji} ${e.title}`)}
-    <Txta label="Notizen" value={form.notes} onChange={e=>set("notes",e.target.value)} rows={3}/>
-    <div style={{display:"flex",gap:10,justifyContent:"flex-end",paddingTop:16,borderTop:`1px solid ${C.border}`}}><Btn onClick={onClose} variant="secondary">Abbrechen</Btn><Btn onClick={()=>onSave({...form,id:form.id||uid(),createdAt:form.createdAt||now()})}>{session?.id?"Speichern":"Erstellen"}</Btn></div>
-  </div>);
-}
 
-
-function SessionDetailView({s,players,coaches,exercises,onEdit,onDelete,onClose,onSaveSession,onReplan,onPrint}) {
+function SessionDetailView({s,players,coaches,exercises,onDelete,onClose,onSaveSession,onReplan,onPrint}) {
   const gP=id=>players.find(p=>p.id===id);
   const gC=id=>coaches.find(c=>c.id===id);
   const gE=id=>exercises.find(e=>e.id===id);
@@ -2064,7 +2029,6 @@ function SessionDetailView({s,players,coaches,exercises,onEdit,onDelete,onClose,
       <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap"}}>
         {onReplan&&<Btn onClick={onReplan} variant="secondary" style={{flex:1,justifyContent:"center",minWidth:120}}>✏️ Plan bearbeiten</Btn>}
         {onPrint&&<Btn onClick={onPrint} variant="secondary" style={{flex:1,justifyContent:"center",minWidth:100}}>🖨️ PDF erstellen</Btn>}
-        <Btn onClick={onEdit} variant="secondary" style={{flex:1,justifyContent:"center",minWidth:80}}><Edit2 size={13}/> Felder</Btn>
       </div>
       <div style={{display:"flex",gap:8,justifyContent:"flex-end",flexWrap:"wrap"}}>
         <Btn sm variant="danger" onClick={()=>onDelete()}><Trash2 size={13}/> Löschen</Btn>
@@ -2978,9 +2942,8 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
           <div style={{display:"flex",flexDirection:"column",gap:8}}>{selectedDayItems.map(renderItem)}</div>}
       </div>}
 
-    {modal?.type==="sessionDetail"&&modal.data&&<Modal title={fmtDate(modal.data.date)} onClose={()=>setModal(null)} wide><SessionDetailView s={modal.data} players={players} coaches={coaches} exercises={exercises} onEdit={()=>setModal({type:"sessionForm",data:modal.data})} onDelete={()=>{onDeleteSession(modal.data.id);setModal(null);}} onClose={()=>setModal(null)} onSaveSession={onSaveSession} onPrint={()=>printSession(modal.data,exercises,toast)} onReplan={()=>setModal({type:"setup",continueSessionId:modal.data.id})}/></Modal>}
+    {modal?.type==="sessionDetail"&&modal.data&&<Modal title={fmtDate(modal.data.date)} onClose={()=>setModal(null)} wide><SessionDetailView s={modal.data} players={players} coaches={coaches} exercises={exercises} onDelete={()=>{onDeleteSession(modal.data.id);setModal(null);}} onClose={()=>setModal(null)} onSaveSession={onSaveSession} onPrint={()=>printSession(modal.data,exercises,toast)} onReplan={()=>setModal({type:"setup",continueSessionId:modal.data.id})}/></Modal>}
     {modal?.type==="setup"&&<Modal title="Training planen" onClose={()=>setModal(null)} wide><NewTrainingWizard sessions={sessions} players={players} exercises={exercises} initialSessionId={modal.continueSessionId} startStep={modal.continueSessionId?2:1} onSaveSession={s=>{onSaveSession(s);setModal(null);toast("Training gespeichert");}} onSavePlayer={onSavePlayer} onClose={()=>setModal(null)}/></Modal>}
-    {modal?.type==="sessionForm"&&<Modal title="Training bearbeiten" onClose={()=>setModal(null)} wide><SessionForm session={modal.data} players={players} coaches={coaches} exercises={exercises} onSave={s=>{onSaveSession(s);setModal(null);toast("Training gespeichert");}} onClose={()=>setModal(null)}/></Modal>}
     {modal?.type==="meetingDetail"&&modal.data&&<Modal title={modal.data.title||"Trainertreff"} onClose={()=>setModal(null)} wide><MeetingCard m={modal.data} initialOpen onEdit={()=>setModal({type:"meetingForm",data:modal.data})} onDel={()=>{onDeleteMeeting(modal.data.id);setModal(null);}} onSave={m=>{onSaveMeeting(m);setModal({type:"meetingDetail",data:m});}} readOnly={readOnly}/></Modal>}
     {modal?.type==="eventType"&&<Modal title="Neuer Termin" onClose={()=>setModal(null)}>
       <div style={{fontSize:13,color:C.muted,marginBottom:16}}>Was für ein Termin soll angelegt werden?</div>
@@ -3008,10 +2971,11 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
 function TrainingPage({sessions,players,coaches,exercises,onSaveSession,onDeleteSession,onSavePlayer,apiKey,toast,onSaveExercise,pendingSetup,onClearPendingSetup,onlineUsers,currentUser,onGoHome,onGoBack,onGoToCalendar,recurringSlots,onSaveSlot,onDeleteSlot,onGenerateSessions}) {
   const [modal,setModal]=useState(()=>pendingSetup?{type:"setup",setup:pendingSetup}:null);
   useEffect(()=>{if(pendingSetup){setModal({type:"setup",setup:pendingSetup});onClearPendingSetup?.();}},[]);
-  const [showSlots,setShowSlots]=useState(false);
   const todayStr=todayISO();
   const gP=id=>players.find(p=>p.id===id),gC=id=>coaches.find(c=>c.id===id),gE=id=>exercises.find(e=>e.id===id);
   const next5=[...sessions].filter(s=>s.date>=todayStr).sort((a,b)=>a.date.localeCompare(b.date)||(a.time||"").localeCompare(b.time||"")).slice(0,5);
+  const WEEKDAY_ADVERB={1:"Montags",2:"Dienstags",3:"Mittwochs",4:"Donnerstags",5:"Freitags",6:"Samstags",7:"Sonntags"};
+  const sortedSlots=[...(recurringSlots||[])].sort((a,b)=>a.weekday-b.weekday||(a.time||"").localeCompare(b.time||""));
 
   const renderRow=s=>{
     const pr=(s.playerIds||[]).map(gP).filter(Boolean),ex=(s.exerciseIds||[]).map(gE).filter(Boolean);
@@ -3031,6 +2995,18 @@ function TrainingPage({sessions,players,coaches,exercises,onSaveSession,onDelete
 
   return(<div>
     <PageHeader title="Training" sub="Nächste Trainings & Serientermine" onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
+
+    <div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"14px 16px",marginBottom:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:sortedSlots.length>0?10:0}}>
+        <div style={{fontWeight:800,fontSize:14,color:C.text}}>🔁 Trainingszeiten</div>
+        <button onClick={()=>setModal({type:"slots"})} title="Trainingszeiten bearbeiten" style={{background:"none",border:`1.5px solid ${C.border}`,borderRadius:8,padding:"5px 10px",cursor:"pointer",color:C.text,display:"flex",alignItems:"center",gap:4,fontSize:12,fontWeight:700,fontFamily:"inherit"}}><Edit2 size={13}/> Bearbeiten</button>
+      </div>
+      {sortedSlots.length===0?<div style={{fontSize:13,color:C.muted}}>Noch keine festen Trainingszeiten hinterlegt.</div>:
+        <div style={{display:"flex",flexDirection:"column",gap:4}}>
+          {sortedSlots.map(s=><div key={s.id} style={{fontSize:15,color:C.text,fontWeight:700}}>{WEEKDAY_ADVERB[s.weekday]} {s.time||"–"} Uhr{s.location?<span style={{color:C.muted,fontWeight:400}}> · {s.location}</span>:null}</div>)}
+        </div>}
+    </div>
+
     <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
       <Btn onClick={()=>setModal({type:"notfall"})} style={{background:"#dc2626",color:"white"}} sm><AlertTriangle size={14}/> SOS</Btn>
       <Btn onClick={()=>setModal({type:"setup"})}><CalendarDays size={16}/> Neues Training</Btn>
@@ -3043,18 +3019,10 @@ function TrainingPage({sessions,players,coaches,exercises,onSaveSession,onDelete
     {next5.length===0?<div style={{color:C.muted,fontSize:13,marginBottom:20}}>Keine anstehenden Trainings.</div>:
       <div style={{marginBottom:24}}>{next5.map(renderRow)}</div>}
 
-    <div style={{borderTop:`1px solid ${C.border}`,paddingTop:14}}>
-      <button onClick={()=>setShowSlots(v=>!v)} style={{display:"flex",alignItems:"center",gap:6,background:"none",border:"none",cursor:"pointer",padding:0,marginBottom:showSlots?12:0}}>
-        <span style={{fontSize:11,color:C.muted}}>{showSlots?"▼":"▶"}</span>
-        <span style={{fontSize:13,fontWeight:700,color:C.muted}}>🔁 Feste Wochentermine (Serientermine)</span>
-      </button>
-      {showSlots&&<RecurringSlotsTab slots={recurringSlots||[]} sessions={sessions} onSaveSlot={onSaveSlot} onDeleteSlot={onDeleteSlot} onGenerateSessions={onGenerateSessions} toast={toast}/>}
-    </div>
-
+    {modal?.type==="slots"&&<Modal title="Trainingszeiten" onClose={()=>setModal(null)} wide><RecurringSlotsTab slots={recurringSlots||[]} sessions={sessions} onSaveSlot={onSaveSlot} onDeleteSlot={onDeleteSlot} onGenerateSessions={onGenerateSessions} toast={toast}/></Modal>}
     {modal?.type==="notfall"&&<Modal title="🚨 SOS-Notfall-Plan" onClose={()=>setModal(null)} wide><NotfallModal exercises={exercises} onClose={()=>setModal(null)}/></Modal>}
     {modal?.type==="setup"&&<Modal title="Training planen" onClose={()=>setModal(null)} wide><NewTrainingWizard sessions={sessions} players={players} exercises={exercises} initialSetup={modal.setup} initialSessionId={modal.continueSessionId} startStep={modal.continueSessionId?2:1} onSaveSession={s=>{onSaveSession(s);setModal(null);toast("Training gespeichert");}} onSavePlayer={onSavePlayer} onClose={()=>setModal(null)}/></Modal>}
-    {modal?.type==="sessionDetail"&&modal.data&&<Modal title={fmtDate(modal.data.date)} onClose={()=>setModal(null)} wide><SessionDetailView s={modal.data} players={players} coaches={coaches} exercises={exercises} onEdit={()=>setModal({type:"sessionForm",data:modal.data})} onDelete={()=>{onDeleteSession(modal.data.id);setModal(null);}} onClose={()=>setModal(null)} onSaveSession={onSaveSession} onPrint={()=>printSession(modal.data,exercises,toast)} onReplan={()=>setModal({type:"setup",continueSessionId:modal.data.id})}/></Modal>}
-    {modal?.type==="sessionForm"&&<Modal title="Training bearbeiten" onClose={()=>setModal(null)} wide><SessionForm session={modal.data} players={players} coaches={coaches} exercises={exercises} onSave={s=>{onSaveSession(s);setModal(null);}} onClose={()=>setModal(null)}/></Modal>}
+    {modal?.type==="sessionDetail"&&modal.data&&<Modal title={fmtDate(modal.data.date)} onClose={()=>setModal(null)} wide><SessionDetailView s={modal.data} players={players} coaches={coaches} exercises={exercises} onDelete={()=>{onDeleteSession(modal.data.id);setModal(null);}} onClose={()=>setModal(null)} onSaveSession={onSaveSession} onPrint={()=>printSession(modal.data,exercises,toast)} onReplan={()=>setModal({type:"setup",continueSessionId:modal.data.id})}/></Modal>}
   </div>);
 }
 
@@ -3597,7 +3565,116 @@ function PauseEditor({round,value,defaultVal,isCustom,onChange}) {
   </div>);
 }
 
-function TournamentDetail({tournament:t,onUpdate,onBack,coaches=[],toast}) {
+// ── TURNIER BEARBEITEN (Allgemein + optional Spieler/Teams bei externer Ausrichtung) ──
+function TournamentEditWizard({tournament,players,onSavePlayer,onSave,onClose}) {
+  const [form,setForm]=useState({...tournament});
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const isExternal=form.hosting==="other";
+  const totalSteps=isExternal?3:1;
+  const [step,setStep]=useState(1);
+  const [playerIds,setPlayerIds]=useState(tournament.playerIds||[]);
+  const [teams,setTeams]=useState(tournament.hosting==="other"?(tournament.teams||[]):[]);
+  const [newName,setNewName]=useState("");
+  const [confirmPlayer,setConfirmPlayer]=useState(null);
+
+  const handlePlanFile=e=>{
+    const file=e.target.files?.[0];
+    if(!file)return;
+    const reader=new FileReader();
+    reader.onload=()=>setForm(f=>({...f,planFileData:reader.result,planFileName:file.name,planFileType:file.type}));
+    reader.readAsDataURL(file);
+  };
+  const addPlayer=()=>{
+    if(!newName.trim())return;
+    setConfirmPlayer({id:uid(),name:newName.trim()});
+    setNewName("");
+  };
+  const resolveNewPlayer=active=>{
+    if(!confirmPlayer)return;
+    onSavePlayer?.({...EMPTY_PLAYER,id:confirmPlayer.id,name:confirmPlayer.name,active,createdAt:now()});
+    setPlayerIds(v=>[...v,confirmPlayer.id]);
+    setConfirmPlayer(null);
+  };
+  const teamBuilderPlayers=playerIds.length?players.filter(p=>playerIds.includes(p.id)):players.filter(p=>p.active);
+  const finish=(extra)=>onSave({...form,...(isExternal?{playerIds,teams}:{}),...(extra||{})});
+  const stepLabel=step===1?"Allgemein":step===2?"Spieler":"Teams";
+
+  return(<div>
+    {totalSteps>1&&<>
+      <div style={{display:"flex",gap:6,marginBottom:6}}>{[1,2,3].map(n=><div key={n} style={{flex:1,height:4,borderRadius:2,background:n<=step?C.primary:C.border}}/>)}</div>
+      <div style={{fontSize:11,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:18}}>Schritt {step} von {totalSteps} · {stepLabel}</div>
+    </>}
+
+    {step===1&&<div>
+      <Inp label="Turniername *" value={form.name} onChange={e=>set("name",e.target.value)}/>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <Inp label="Datum" type="date" value={form.date} onChange={e=>set("date",e.target.value)}/>
+        <Inp label="Uhrzeit" type="time" value={form.startTime||""} onChange={e=>set("startTime",e.target.value)}/>
+      </div>
+      <Inp label="Ort" value={form.location||""} onChange={e=>set("location",e.target.value)} placeholder="z.B. Sportplatz..."/>
+      <Inp label="Gegen wen / teilnehmende Vereine" value={form.opponent||""} onChange={e=>set("opponent",e.target.value)}/>
+      <Sel label="Untergrund" value={form.surface||""} onChange={e=>set("surface",e.target.value)}>
+        <option value="">– auswählen –</option>
+        <option value="rasen">Rasen</option>
+        <option value="kunstrasen">Kunstrasen</option>
+        <option value="halle">Halle</option>
+        <option value="asche">Asche</option>
+      </Sel>
+      <Txta label="Notizen (optional)" value={form.notes||""} onChange={e=>set("notes",e.target.value)} rows={2}/>
+      <div style={{marginTop:4,marginBottom:16}}>
+        <label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:8,textTransform:"uppercase",letterSpacing:.6}}>Wer richtet das Turnier aus?</label>
+        <div style={{display:"flex",gap:8}}>
+          {[["self","🏠 Wir selbst"],["other","🤝 Anderer Verein"]].map(([v,l])=><button key={v} onClick={()=>set("hosting",v)} style={{flex:1,padding:"10px 8px",borderRadius:8,border:`2px solid ${form.hosting===v?C.primary:C.border}`,background:form.hosting===v?C.accentL:"white",color:form.hosting===v?C.primary:C.muted,cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"inherit"}}>{l}</button>)}
+        </div>
+      </div>
+      {isExternal&&<div>
+        <Inp label="Link zum Turnierplan (optional)" value={form.planLink||""} onChange={e=>set("planLink",e.target.value)} placeholder="https://..."/>
+        <div style={{marginBottom:14}}>
+          <label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:8,textTransform:"uppercase",letterSpacing:.6}}>PDF oder Foto hochladen (optional)</label>
+          <input type="file" accept="application/pdf,image/*" onChange={handlePlanFile} style={{fontSize:13,fontFamily:"inherit"}}/>
+          {form.planFileName&&<div style={{fontSize:12,color:C.primary,marginTop:8,fontWeight:600}}>📎 {form.planFileName}</div>}
+        </div>
+      </div>}
+      <div style={{display:"flex",gap:8,paddingTop:16,borderTop:`1px solid ${C.border}`,flexWrap:"nowrap"}}>
+        <Btn onClick={onClose} variant="secondary" sm style={{flex:1,justifyContent:"center"}}>Abbrechen</Btn>
+        {isExternal?<>
+          <Btn onClick={()=>finish()} variant="secondary" sm style={{flex:1,justifyContent:"center"}} disabled={!form.name.trim()}><CheckSquare size={13}/> Speichern</Btn>
+          <Btn onClick={()=>setStep(2)} sm style={{flex:1,justifyContent:"center"}} disabled={!form.name.trim()}>Weiter →</Btn>
+        </>:<Btn onClick={()=>finish()} sm style={{flex:1,justifyContent:"center"}} disabled={!form.name.trim()}><CheckSquare size={13}/> Speichern</Btn>}
+      </div>
+    </div>}
+
+    {step===2&&<div>
+      <label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Spieler <span style={{fontWeight:400,textTransform:"none"}}>(optional – Weiter zum Überspringen)</span></label>
+      <div style={{marginBottom:14}}>
+        <PlayerList players={players} selPlayers={playerIds} setSelPlayers={setPlayerIds} showStrength/>
+      </div>
+      {!confirmPlayer?<div style={{display:"flex",gap:8,marginBottom:16}}>
+        <input value={newName} onChange={e=>setNewName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addPlayer()} placeholder="Neuer Spieler – Name eingeben..." style={{flex:1,padding:"9px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:14,fontFamily:"inherit",outline:"none",background:"white",color:C.text}}/>
+        <Btn variant="secondary" onClick={addPlayer}><Plus size={14}/> Hinzufügen</Btn>
+      </div>:<div style={{background:"#fffbeb",border:"1px solid #fde68a",borderRadius:10,padding:"12px 14px",marginBottom:16}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#92400e",marginBottom:10}}>„{confirmPlayer.name}" in die aktiven Spieler übernehmen?</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <Btn sm onClick={()=>resolveNewPlayer(true)}>Ja, aktiv aufnehmen</Btn>
+          <Btn sm variant="secondary" onClick={()=>resolveNewPlayer(false)}>Nein, nur für dieses Turnier</Btn>
+        </div>
+      </div>}
+      <div style={{display:"flex",gap:8,paddingTop:16,borderTop:`1px solid ${C.border}`,flexWrap:"nowrap"}}>
+        <Btn onClick={()=>setStep(1)} variant="secondary" sm style={{flex:1,justifyContent:"center"}}>← Zurück</Btn>
+        <Btn onClick={()=>finish()} variant="secondary" sm style={{flex:1,justifyContent:"center"}}><CheckSquare size={13}/> Speichern</Btn>
+        <Btn onClick={()=>setStep(3)} sm style={{flex:1,justifyContent:"center"}}>Weiter →</Btn>
+      </div>
+    </div>}
+
+    {step===3&&<div>
+      <div style={{fontSize:12,color:C.muted,marginBottom:10}}>(optional – Teams können hier direkt für das Turnier gebildet werden. „Schließen" speichert ohne Team-Änderung.)</div>
+      <button onClick={()=>setStep(2)} style={{background:"none",border:"none",color:C.primary,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit",padding:0,marginBottom:10}}>← Zurück zur Spielerauswahl</button>
+      <TeamBuilderModal availablePlayers={teamBuilderPlayers} onSaveTeams={(tm)=>finish({teams:tm})} onClose={()=>finish()}/>
+    </div>}
+  </div>);
+}
+
+function TournamentDetail({tournament:t,onUpdate,onBack,coaches=[],toast,players,onSavePlayer}) {
   const [tab,setTab]=useState("plan");
   const [sc,setSc]=useState(Object.fromEntries(t.matches.map(m=>[m.id,{h:m.homeScore??0,a:m.awayScore??0}])));
   // Startzeit/Pause/Trainer-Zuweisung werden aus dem Turnier initialisiert UND bei jeder Änderung sofort zurückgeschrieben,
@@ -3611,6 +3688,7 @@ function TournamentDetail({tournament:t,onUpdate,onBack,coaches=[],toast}) {
   const setSlotPauses=fn=>{setSlotPausesLocal(prev=>{const next=typeof fn==="function"?fn(prev):fn;onUpdate({...t,slotPauses:next});return next;});};
   const assignCoach=(fi,cid)=>{setCoachAssignLocal(a=>{const next={...a,[fi]:cid};onUpdate({...t,coachAssign:next});return next;});};
   const [rueckrundeModal,setRueckrundeModal]=useState(false);
+  const [editModal,setEditModal]=useState(false);
   const gt=id=>t.teams.find(x=>x.id===id);
   const fields=t.fields||1;
   const adjScore=(mId,side,delta)=>setSc(s=>({...s,[mId]:{...s[mId],[side]:Math.max(0,(s[mId]?.[side]||0)+delta)}}));
@@ -3671,7 +3749,9 @@ function TournamentDetail({tournament:t,onUpdate,onBack,coaches=[],toast}) {
       <div style={{flex:1}}><h2 style={{margin:0,fontSize:20,fontWeight:900,color:C.text}}>{t.name}</h2><div style={{fontSize:13,color:C.muted}}>{t.hosting==="other"?`${fmtDate(t.date)}${t.location?` · 📍 ${t.location}`:""}${t.opponent?` · ⚽ ${t.opponent}`:""}`:`${fmtDate(t.date)} · ${t.teams.length} Teams · ${played}/${t.matches.length} Spiele · ${t.matchDuration} Min/Spiel${hasRueckrunde?" · 🔁 Hin- & Rückrunde":""}`}</div></div>
       {t.hosting!=="other"&&!hasRueckrunde&&<Btn sm variant="secondary" onClick={()=>setRueckrundeModal(true)}>🔁 Rückrunde erstellen</Btn>}
       {t.hosting!=="other"&&<Btn sm variant="secondary" onClick={printTournament}>🖨️ Turnierplan PDF</Btn>}
+      <Btn sm variant="secondary" onClick={()=>setEditModal(true)}><Edit2 size={13}/> Bearbeiten</Btn>
     </div>
+    {editModal&&<Modal title="Turnier bearbeiten" onClose={()=>setEditModal(false)} wide><TournamentEditWizard tournament={t} players={players} onSavePlayer={onSavePlayer} onSave={upd=>{onUpdate({...t,...upd});setEditModal(false);toast?.("Turnier gespeichert");}} onClose={()=>setEditModal(false)}/></Modal>}
     {t.hosting==="other"?(
       <div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"16px 18px"}}>
         <div style={{fontSize:13,color:C.muted,marginBottom:12}}>🤝 Dieses Turnier wird von einem anderen Verein ausgerichtet.</div>
@@ -3874,13 +3954,13 @@ function TournamentDetail({tournament:t,onUpdate,onBack,coaches=[],toast}) {
   </div>);
 }
 
-function TurnierPage({tournaments,onSaveTournament,onDeleteTournament,coaches=[],onlineUsers,currentUser,toast,onGoHome,onGoBack,initialOpenId,onClearInitialOpen}) {
+function TurnierPage({tournaments,onSaveTournament,onDeleteTournament,coaches=[],players=[],onSavePlayer,onlineUsers,currentUser,toast,onGoHome,onGoBack,initialOpenId,onClearInitialOpen}) {
   const [modal,setModal]=useState(null);
   const [open,setOpen]=useState(initialOpenId||null);
   useEffect(()=>{if(initialOpenId){setOpen(initialOpenId);onClearInitialOpen?.();}},[]); // eslint-disable-line
   const [selectMode,setSelectMode]=useState(false);
   const [selected,setSelected]=useState([]);
-  if(open){const t=tournaments.find(x=>x.id===open);if(!t){setOpen(null);return null;}return<TournamentDetail tournament={t} onUpdate={onSaveTournament} onBack={()=>setOpen(null)} coaches={coaches} toast={toast}/>;}
+  if(open){const t=tournaments.find(x=>x.id===open);if(!t){setOpen(null);return null;}return<TournamentDetail tournament={t} onUpdate={onSaveTournament} onBack={()=>setOpen(null)} coaches={coaches} toast={toast} players={players} onSavePlayer={onSavePlayer}/>;}
   const toggleSel=id=>setSelected(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id]);
   const exitSelectMode=()=>{setSelectMode(false);setSelected([]);};
   const printMultiple=()=>{
@@ -5349,7 +5429,7 @@ export default function App() {
       {page==="orga"&&can(role,"orga")&&<OrgaPage todos={todos} onSaveTodo={saveTodo} onDeleteTodo={id=>{const i=todos.find(t=>t.id===id);setTodos(prev=>prev.filter(t=>t.id!==id));showUndo("Task",i,()=>setTodos(prev=>[i,...prev]));}} coaches={coaches} currentUser={user} toast={toast} showUndo={showUndo} readOnly={!can(role,"editAnything")} onlineUsers={onlineUsers} pendingTarget={pendingOrgaTarget} onClearPendingTarget={()=>setPendingOrgaTarget(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="teamplaner"&&<TeamplanerPage players={players} teamsets={teamsets} onSaveTeamset={can(role,"editAnything")?saveTSets:null} onDeleteTeamset={can(role,"editAnything")?id=>{const i=teamsets.find(t=>t.id===id);setTeamsets(prev=>prev.filter(t=>t.id!==id));showUndo("Team-Aufstellung",i,()=>setTeamsets(prev=>[i,...prev]));}:null} readOnly={!can(role,"editAnything")} showStrength={can(role,"seeStrength")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="training" &&<TrainingPage sessions={sessions} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} apiKey={apiKey} toast={toast} onSaveExercise={saveEx} pendingSetup={pendingSetup} onClearPendingSetup={()=>setPendingSetup(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} onGoToCalendar={()=>setPage("calendar")} recurringSlots={recurringSlots} onSaveSlot={saveSlot} onDeleteSlot={id=>{const i=recurringSlots.find(s=>s.id===id);setRecurringSlots(prev=>prev.filter(s=>s.id!==id));showUndo("Serientermin",i,()=>setRecurringSlots(prev=>[i,...prev]));}} onGenerateSessions={generateSessions}/>}
-      {page==="turnier"  &&<TurnierPage  tournaments={tournaments} onSaveTournament={saveTo} onDeleteTournament={id=>{const i=tournaments.find(t=>t.id===id);setTournaments(prev=>prev.filter(t=>t.id!==id));showUndo("Turnier",i,()=>setTournaments(prev=>[i,...prev]));}} coaches={coaches} onlineUsers={onlineUsers} currentUser={user} toast={toast} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} initialOpenId={pendingTurnierId} onClearInitialOpen={()=>setPendingTurnierId(null)}/>}
+      {page==="turnier"  &&<TurnierPage  tournaments={tournaments} onSaveTournament={saveTo} onDeleteTournament={id=>{const i=tournaments.find(t=>t.id===id);setTournaments(prev=>prev.filter(t=>t.id!==id));showUndo("Turnier",i,()=>setTournaments(prev=>[i,...prev]));}} coaches={coaches} players={players} onSavePlayer={can(role,"editAnything")?savePl:null} onlineUsers={onlineUsers} currentUser={user} toast={toast} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} initialOpenId={pendingTurnierId} onClearInitialOpen={()=>setPendingTurnierId(null)}/>}
       {page==="calendar" &&<CalendarPage sessions={sessions} meetings={meetings} tournaments={tournaments} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} onSaveMeeting={saveMeeting} onDeleteMeeting={id=>{const i=meetings.find(m=>m.id===id);setMeetings(prev=>prev.filter(m=>m.id!==id));showUndo("Trainertreff",i,()=>setMeetings(prev=>[i,...prev]));}} onSaveTournament={saveTo} onSaveExercise={saveEx} apiKey={apiKey} toast={toast} readOnly={!can(role,"editAnything")} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} pendingTarget={pendingCalendarTarget} onClearPendingTarget={()=>setPendingCalendarTarget(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="kasse"    &&can(role,"kasse")&&<KassePage kassenbuch={kassenbuch} onSave={can(role,"editKasse")?saveKa:null} onDelete={can(role,"editKasse")?id=>{const i=kassenbuch.find(k=>k.id===id);setKassenbuch(prev=>prev.filter(k=>k.id!==id));showUndo("Eintrag",i,()=>setKassenbuch(prev=>[i,...prev]));}:null} readOnly={!can(role,"editKasse")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {(can(role,"settings")||role==="trainer"||role==="eltern")&&page==="settings"&&<SettingsPage exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={setCurrentGroupId} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
