@@ -414,7 +414,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.22.1";
+const APP_VERSION = "3.23.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -1436,7 +1436,7 @@ function PlayerList({players,selPlayers,setSelPlayers,onEdit,onDel,showStrength=
 
   const filtered=players
     .filter(p=>{
-      if(filterActive==="active"&&!p.active)return false;
+      if(filterActive==="active"&&!p.active&&!selPlayers.includes(p.id))return false;
       if(filterActive==="inactive"&&p.active)return false;
       if(filterStr&&String(p.strength)!==filterStr)return false;
       if(search){const q=search.toLowerCase();if(!p.name.toLowerCase().includes(q))return false;}
@@ -1527,6 +1527,7 @@ function PlayerList({players,selPlayers,setSelPlayers,onEdit,onDel,showStrength=
               {p.name}
               {bd?.isToday&&<span style={{fontSize:12}}>🎉</span>}
               {!p.active&&<span style={{fontSize:10,padding:"1px 6px",borderRadius:10,background:"#fef3c7",color:"#d97706",fontWeight:700}}>inaktiv</span>}
+              {p.guest&&<span style={{fontSize:10,padding:"1px 6px",borderRadius:10,background:"#e0e7ff",color:"#4338ca",fontWeight:700}}>Gast</span>}
             </div>
             <div style={{display:"flex",gap:8,marginTop:2,flexWrap:"wrap",alignItems:"center"}}>
               {showStrength!==false&&<span style={{fontSize:11,color:STR[p.strength]?.color||C.muted,fontWeight:600}}>{STR[p.strength]?.emoji} {STR[p.strength]?.label}</span>}
@@ -1744,7 +1745,7 @@ function TeamPage({players,coaches,sessions,onSaveSession,onSavePlayer,onDeleteP
 }
 
 // ── TEAM BUILDER ──────────────────────────────────────────────────
-function TeamBuilderModal({availablePlayers,onSaveTeams,onClose,onSaveTeamset}) {
+function TeamBuilderModal({availablePlayers,onSaveTeams,onClose,onSaveTeamset,actionLabel="Als Training"}) {
   const activeDef=availablePlayers.filter(p=>p.active);
   const defTeams=Math.max(2,Math.round(activeDef.length/3));
   const [numTeams,setNumTeams]=useState(defTeams);
@@ -1804,7 +1805,7 @@ function TeamBuilderModal({availablePlayers,onSaveTeams,onClose,onSaveTeamset}) 
       <div style={{display:"flex",gap:10,justifyContent:"flex-end",marginTop:16,flexWrap:"wrap"}}>
         <Btn onClick={generate} variant="secondary"><RefreshCw size={14}/> Neu mischen</Btn>
         {onSaveTeamset&&<Btn variant="secondary" onClick={()=>{onSaveTeamset({id:uid(),date:todayISO(),name:`Teams ${new Date().toLocaleDateString("de-DE")}`,teams,createdAt:now()});onSaveTeams(teams,false);}}>💾 Speichern</Btn>}
-        <Btn onClick={()=>onSaveTeams(teams,true)}><CalendarDays size={14}/> Als Training</Btn>
+        <Btn onClick={()=>onSaveTeams(teams,true)}><CalendarDays size={14}/> {actionLabel}</Btn>
       </div>
     </>)}
     <div style={{display:"flex",gap:10,justifyContent:"flex-end",marginTop:12,paddingTop:12,borderTop:`1px solid ${C.border}`}}><Btn onClick={onClose} variant="secondary">Schließen</Btn></div>
@@ -2812,7 +2813,6 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
   const future=items.filter(i=>i.date>=todayStr).sort((a,b)=>a.date.localeCompare(b.date));
   const past=items.filter(i=>i.date<todayStr).sort((a,b)=>a.date.localeCompare(b.date));
 
-  const DOT_COLORS={training:"#2563eb",spieltag:"#16a34a",treffen:"#d97706"};
   const itemsByDate={};
   items.forEach(it=>{(itemsByDate[it.date]=itemsByDate[it.date]||[]).push(it);});
 
@@ -2849,6 +2849,15 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
     </div>
   );
 
+  const openItem=it=>{
+    if(it.type==="training"){
+      setModal(isSessionPlanned(it.raw)?{type:"sessionDetail",data:it.raw}:{type:"setup",continueSessionId:it.raw.id});
+    }else if(it.type==="treffen"){
+      setModal({type:"meetingDetail",data:it.raw});
+    }else{
+      onOpenTournament(it.raw.id);
+    }
+  };
   const renderItem=it=>{
     if(it.type==="training"){
       const s=it.raw;
@@ -2938,11 +2947,15 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
             const dayItems=itemsByDate[cell.date]||[];
             const isToday=cell.date===todayStr;
             const isSel=cell.date===selectedDay;
-            return(<div key={cell.date} onClick={()=>setSelectedDay(cell.date)} style={{minHeight:52,padding:"4px 4px",borderRadius:8,border:`1.5px solid ${isSel?C.primary:isToday?C.accent:C.border}`,background:isSel?C.accentL:cell.inMonth?C.card:"#f8fafc",opacity:cell.inMonth?1:.45,cursor:"pointer"}}>
-              <div style={{fontSize:12,fontWeight:isToday?800:600,color:isToday?C.primary:C.text}}>{Number(cell.date.slice(8,10))}</div>
-              <div style={{display:"flex",gap:2,flexWrap:"wrap",marginTop:3}}>
-                {dayItems.slice(0,4).map((it,i)=><span key={i} style={{width:6,height:6,borderRadius:"50%",background:DOT_COLORS[it.type],flexShrink:0}}/>)}
-              </div>
+            return(<div key={cell.date} onClick={()=>setSelectedDay(cell.date)} style={{minHeight:80,padding:"4px 3px",borderRadius:8,border:`1.5px solid ${isSel?C.primary:isToday?C.accent:C.border}`,background:isSel?C.accentL:cell.inMonth?C.card:"#f8fafc",opacity:cell.inMonth?1:.45,cursor:"pointer",overflow:"hidden"}}>
+              <div style={{fontSize:12,fontWeight:isToday?800:600,color:isToday?C.primary:C.text,marginBottom:2}}>{Number(cell.date.slice(8,10))}</div>
+              {dayItems.slice(0,3).map((it,i)=>{
+                const label=it.type==="training"?"Training":it.type==="spieltag"?(it.raw.name||"Turnier"):(it.raw.title||"Treffen");
+                const bg=it.type==="training"?"#a7ddc8":it.type==="spieltag"?"#14532d":"#fde68a";
+                const fg=it.type==="training"?"#14532d":it.type==="spieltag"?"#ffffff":"#78350f";
+                return(<div key={i} onClick={e=>{e.stopPropagation();openItem(it);}} style={{fontSize:10,fontWeight:700,padding:"2px 4px",borderRadius:4,background:bg,color:fg,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginBottom:2,cursor:"pointer"}}>{label}</div>);
+              })}
+              {dayItems.length>3&&<div style={{fontSize:9,color:C.muted,fontWeight:700}}>+{dayItems.length-3} mehr</div>}
             </div>);
           })}
         </div>
@@ -3126,7 +3139,8 @@ function NewTrainingWizard({sessions,players,exercises,initialSetup,initialSessi
   const [teams,setTeams]=useState(initSession?.teams||[]);
   const [exerciseIds,setExerciseIds]=useState(initSession?.exerciseIds||[]);
   const [newName,setNewName]=useState("");
-  const [confirmPlayer,setConfirmPlayer]=useState(null); // {id,name} wartet auf Ja/Nein
+  const [confirmPlayer,setConfirmPlayer]=useState(null); // {id,name} wartet auf Auswahl
+  const [newPlayerFormOpen,setNewPlayerFormOpen]=useState(false);
 
   const selectSlot=s=>{setSelectedSessionId(s.id);setDate(s.date);setTime(s.time||"");setDuration(s.duration||60);setLocation(s.location||"");};
   const togE=id=>setExerciseIds(v=>v.includes(id)?v.filter(x=>x!==id):[...v,id]);
@@ -3136,9 +3150,9 @@ function NewTrainingWizard({sessions,players,exercises,initialSetup,initialSessi
     setConfirmPlayer({id:uid(),name:newName.trim()});
     setNewName("");
   };
-  const resolveNewPlayer=active=>{
+  const addAsGuest=()=>{
     if(!confirmPlayer)return;
-    onSavePlayer?.({...EMPTY_PLAYER,id:confirmPlayer.id,name:confirmPlayer.name,active,createdAt:now()});
+    onSavePlayer?.({...EMPTY_PLAYER,id:confirmPlayer.id,name:confirmPlayer.name,active:false,guest:true,createdAt:now()});
     setPlayerIds(v=>[...v,confirmPlayer.id]);
     setConfirmPlayer(null);
   };
@@ -3198,12 +3212,15 @@ function NewTrainingWizard({sessions,players,exercises,initialSetup,initialSessi
         <input value={newName} onChange={e=>setNewName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addPlayer()} placeholder="Neuer Spieler – Name eingeben..." style={{flex:1,padding:"9px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:14,fontFamily:"inherit",outline:"none",background:"white",color:C.text}}/>
         <Btn variant="secondary" onClick={addPlayer}><Plus size={14}/> Hinzufügen</Btn>
       </div>:<div style={{background:"#fffbeb",border:"1px solid #fde68a",borderRadius:10,padding:"12px 14px"}}>
-        <div style={{fontSize:13,fontWeight:700,color:"#92400e",marginBottom:10}}>„{confirmPlayer.name}" in die aktiven Spieler übernehmen?</div>
+        <div style={{fontSize:13,fontWeight:700,color:"#92400e",marginBottom:10}}>„{confirmPlayer.name}" wie hinzufügen?</div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          <Btn sm onClick={()=>resolveNewPlayer(true)}>Ja, aktiv aufnehmen</Btn>
-          <Btn sm variant="secondary" onClick={()=>resolveNewPlayer(false)}>Nein, nur für dieses Training</Btn>
+          <Btn sm onClick={()=>setNewPlayerFormOpen(true)}>Zum Team hinzufügen</Btn>
+          <Btn sm variant="secondary" onClick={addAsGuest}>Gastspieler</Btn>
         </div>
       </div>}
+      {newPlayerFormOpen&&confirmPlayer&&<Modal title="Neuer Spieler" onClose={()=>{setNewPlayerFormOpen(false);setConfirmPlayer(null);}}>
+        <PlayerForm player={{name:confirmPlayer.name}} onSave={p=>{onSavePlayer?.(p);setPlayerIds(v=>[...v,p.id]);setNewPlayerFormOpen(false);setConfirmPlayer(null);}} onClose={()=>{setNewPlayerFormOpen(false);setConfirmPlayer(null);}}/>
+      </Modal>}
     </div>}
 
     {step===3&&<div>
@@ -3585,6 +3602,7 @@ function TournamentEditWizard({tournament,players,onSavePlayer,onSave,onClose}) 
   const [teams,setTeams]=useState(tournament.hosting==="other"?(tournament.teams||[]):[]);
   const [newName,setNewName]=useState("");
   const [confirmPlayer,setConfirmPlayer]=useState(null);
+  const [newPlayerFormOpen,setNewPlayerFormOpen]=useState(false);
 
   const handlePlanFile=e=>{
     const file=e.target.files?.[0];
@@ -3598,9 +3616,9 @@ function TournamentEditWizard({tournament,players,onSavePlayer,onSave,onClose}) 
     setConfirmPlayer({id:uid(),name:newName.trim()});
     setNewName("");
   };
-  const resolveNewPlayer=active=>{
+  const addAsGuest=()=>{
     if(!confirmPlayer)return;
-    onSavePlayer?.({...EMPTY_PLAYER,id:confirmPlayer.id,name:confirmPlayer.name,active,createdAt:now()});
+    onSavePlayer?.({...EMPTY_PLAYER,id:confirmPlayer.id,name:confirmPlayer.name,active:false,guest:true,createdAt:now()});
     setPlayerIds(v=>[...v,confirmPlayer.id]);
     setConfirmPlayer(null);
   };
@@ -3662,12 +3680,15 @@ function TournamentEditWizard({tournament,players,onSavePlayer,onSave,onClose}) 
         <input value={newName} onChange={e=>setNewName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addPlayer()} placeholder="Neuer Spieler – Name eingeben..." style={{flex:1,padding:"9px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:14,fontFamily:"inherit",outline:"none",background:"white",color:C.text}}/>
         <Btn variant="secondary" onClick={addPlayer}><Plus size={14}/> Hinzufügen</Btn>
       </div>:<div style={{background:"#fffbeb",border:"1px solid #fde68a",borderRadius:10,padding:"12px 14px",marginBottom:16}}>
-        <div style={{fontSize:13,fontWeight:700,color:"#92400e",marginBottom:10}}>„{confirmPlayer.name}" in die aktiven Spieler übernehmen?</div>
+        <div style={{fontSize:13,fontWeight:700,color:"#92400e",marginBottom:10}}>„{confirmPlayer.name}" wie hinzufügen?</div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          <Btn sm onClick={()=>resolveNewPlayer(true)}>Ja, aktiv aufnehmen</Btn>
-          <Btn sm variant="secondary" onClick={()=>resolveNewPlayer(false)}>Nein, nur für dieses Turnier</Btn>
+          <Btn sm onClick={()=>setNewPlayerFormOpen(true)}>Zum Team hinzufügen</Btn>
+          <Btn sm variant="secondary" onClick={addAsGuest}>Gastspieler</Btn>
         </div>
       </div>}
+      {newPlayerFormOpen&&confirmPlayer&&<Modal title="Neuer Spieler" onClose={()=>{setNewPlayerFormOpen(false);setConfirmPlayer(null);}}>
+        <PlayerForm player={{name:confirmPlayer.name}} onSave={p=>{onSavePlayer?.(p);setPlayerIds(v=>[...v,p.id]);setNewPlayerFormOpen(false);setConfirmPlayer(null);}} onClose={()=>{setNewPlayerFormOpen(false);setConfirmPlayer(null);}}/>
+      </Modal>}
       <div style={{display:"flex",gap:8,paddingTop:16,borderTop:`1px solid ${C.border}`,flexWrap:"nowrap"}}>
         <Btn onClick={()=>setStep(1)} variant="secondary" sm style={{flex:1,justifyContent:"center"}}>← Zurück</Btn>
         <Btn onClick={()=>finish()} variant="secondary" sm style={{flex:1,justifyContent:"center"}}><CheckSquare size={13}/> Speichern</Btn>
@@ -3677,8 +3698,10 @@ function TournamentEditWizard({tournament,players,onSavePlayer,onSave,onClose}) 
 
     {step===3&&<div>
       <div style={{fontSize:12,color:C.muted,marginBottom:10}}>(optional – Teams können hier direkt für das Turnier gebildet werden. „Schließen" speichert ohne Team-Änderung.)</div>
-      <button onClick={()=>setStep(2)} style={{background:"none",border:"none",color:C.primary,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit",padding:0,marginBottom:10}}>← Zurück zur Spielerauswahl</button>
-      <TeamBuilderModal availablePlayers={teamBuilderPlayers} onSaveTeams={(tm)=>finish({teams:tm})} onClose={()=>finish()}/>
+      <TeamBuilderModal availablePlayers={teamBuilderPlayers} onSaveTeams={(tm)=>finish({teams:tm})} onClose={()=>finish()} actionLabel="✓ Fertig"/>
+      <div style={{display:"flex",gap:8,paddingTop:16,marginTop:12,borderTop:`1px solid ${C.border}`,flexWrap:"nowrap"}}>
+        <Btn onClick={()=>setStep(2)} variant="secondary" sm style={{flex:1,justifyContent:"center"}}>← Zurück</Btn>
+      </div>
     </div>}
   </div>);
 }
@@ -3775,6 +3798,22 @@ function TournamentDetail({tournament:t,onUpdate,onBack,coaches=[],toast,players
           </div>}
           {!t.planLink&&!t.planFileData&&<div style={{fontSize:13,color:C.muted,fontStyle:"italic"}}>Noch kein Turnierplan hinterlegt.</div>}
         </div>
+        <div style={{marginTop:14,paddingTop:14,borderTop:`1px solid ${C.border}`}}>
+          <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>Teilnehmende Spieler</div>
+          {(t.playerIds||[]).length===0?<div style={{fontSize:13,color:C.muted,fontStyle:"italic"}}>Noch keine Spieler ausgewählt.</div>:
+            <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+              {(t.playerIds||[]).map(id=>{const p=(players||[]).find(pl=>pl.id===id);return p?<span key={id} style={{padding:"3px 10px",borderRadius:20,background:p.guest?"#e0e7ff":C.accentL,color:p.guest?"#4338ca":C.primary,fontSize:12,fontWeight:700}}>{p.guest?"🎫 ":`${STR[p.strength]?.emoji} `}{p.name}{p.guest?" (Gast)":""}</span>:null;})}
+            </div>}
+        </div>
+        {(t.teams||[]).length>0&&<div style={{marginTop:14,paddingTop:14,borderTop:`1px solid ${C.border}`}}>
+          <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>Teams</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:10}}>
+            {t.teams.map(tm=><div key={tm.id} style={{background:"#f8fafc",borderRadius:10,border:`1.5px solid ${C.border}`,padding:"10px 12px"}}>
+              <div style={{fontWeight:800,fontSize:13,color:C.text,marginBottom:6}}>{tm.name}</div>
+              {(tm.players||[]).map(p=><div key={p.id} style={{fontSize:12,color:C.muted}}>{p.name}</div>)}
+            </div>)}
+          </div>
+        </div>}
       </div>
     ):(<>
     {rueckrundeModal&&<Modal title="Rückrunde erstellen" onClose={()=>setRueckrundeModal(false)} wide><RueckrundeForm teams={t.teams} baseExcludePairs={t.excludePairs||[]} baseClubOverrides={t.clubOverrides||[]} onSave={createRueckrunde} onClose={()=>setRueckrundeModal(false)}/></Modal>}
