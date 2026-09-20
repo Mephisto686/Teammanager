@@ -228,7 +228,7 @@ function useUserGroups(user) {
       for (const gid of allGroupIds) {
         try {
           const snap = await getDoc(doc(fbDb, "groups", gid, "members", user.uid));
-          if (snap.exists()) results.push({ groupId: gid, role: snap.data().role });
+          if (snap.exists()) results.push({ groupId: gid, role: snap.data().role, roles: snap.data().roles });
         } catch (e) {
           // kein Zugriff = keine Mitgliedschaft in dieser Gruppe, einfach überspringen
         }
@@ -266,6 +266,14 @@ const USER_ROLES = {
 };
 // Eltern und Spieler sehen dieselbe (reduzierte) App; Eltern sind mit Kindern verknüpft, Spieler mit dem eigenen Spielerprofil
 const isFamily = r => r==="eltern" || r==="spieler";
+// Ein Mitglied kann mehrere Rollen im Team haben (z. B. Admin + Trainer + Eltern): Feld "roles" (Liste).
+// "role" bleibt die höchste Rolle (Admin > Trainer > Eltern > Spieler) und ist Grundlage der Firestore-Rechte.
+const ROLE_ORDER = ["admin","trainer","eltern","spieler"];
+const memberRoles = m => {
+  const r = Array.isArray(m?.roles) && m.roles.length ? m.roles : [m?.role || "eltern"];
+  return ROLE_ORDER.filter(x=>r.includes(x)).concat(r.filter(x=>!ROLE_ORDER.includes(x)));
+};
+const primaryRole = roles => ROLE_ORDER.find(r=>roles.includes(r)) || roles[0] || "eltern";
 const CAN = {
   // tabs visible
   start:    ["admin","trainer","eltern","spieler"],
@@ -275,6 +283,7 @@ const CAN = {
   teamplaner:["admin","trainer"],
   turnier:  ["admin","trainer"],
   kasse:    ["admin","trainer"],
+  log:      ["admin","trainer","eltern","spieler"],
   orga:     ["admin","trainer"],
   settings: ["admin"],
   // actions
@@ -411,10 +420,10 @@ function TeamSwitcher() {
       <div style={{position:"absolute",top:36,right:0,background:C.card,border:`1px solid ${C.border}`,borderRadius:12,boxShadow:"0 4px 20px rgba(0,0,0,.18)",padding:6,minWidth:240,zIndex:9991}}>
         <div style={{fontSize:10,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,padding:"4px 8px 6px"}}>Team wechseln</div>
         {ctx.teams.map(t=>{
-          const r=USER_ROLES[t.role]||USER_ROLES.eltern, active=t.id===ctx.currentTeamId;
+          const trs=t.roles&&t.roles.length?t.roles:[t.role], r=USER_ROLES[primaryRole(trs)]||USER_ROLES.eltern, active=t.id===ctx.currentTeamId;
           return(<button key={t.id} onClick={()=>{setOpen(false);if(!active)ctx.switchTeam(t.id);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"9px 10px",borderRadius:8,border:"none",background:active?C.accentL:"transparent",color:C.text,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit",textAlign:"left"}}>
             <span style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.name}</span>
-            <span style={{fontSize:11,fontWeight:800,padding:"2px 8px",borderRadius:20,background:r.bg,color:r.color,flexShrink:0}}>{r.emoji} {r.label}</span>
+            <span style={{fontSize:11,fontWeight:800,padding:"2px 8px",borderRadius:20,background:r.bg,color:r.color,flexShrink:0}}>{trs.map(x=>USER_ROLES[x]?.emoji||"").join("")} {r.label}{trs.length>1?` +${trs.length-1}`:""}</span>
             {active&&<span style={{color:C.primary}}>✓</span>}
           </button>);
         })}
@@ -459,6 +468,139 @@ function RoleSwitcher() {
     style={{display:"flex",alignItems:"center",gap:5,padding:"5px 10px",borderRadius:20,border:`1.5px solid ${cur.color}`,background:cur.bg,color:cur.color,fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",flexShrink:0}}>
     {cur.emoji} {cur.label} <span style={{opacity:.7}}>⇄</span>
   </button>);
+}
+
+// ── AKTIVITÄTSLOG (pro Team, nach Sichtbarkeit gestuft) ────────────
+// Stufen: all = alle Mitglieder | coach = Trainer & Admins | admin = nur Admins
+// Gespeichert in groups/{gid}/log_all | log_coach | log_admin (Dokument-ID: neueste zuerst). Die Firestore-Regeln
+// erzwingen die Sichtbarkeit; die App schreibt jede Änderung in die Stufe, die zur Sichtbarkeit der Sache passt.
+const LOG_CATS = {
+  termine:   {label:"Termine",          icon:"🗓", tier:"all"},
+  training:  {label:"Trainingsplanung", icon:"📋", tier:"coach"},
+  teams:     {label:"Mannschaften",     icon:"🔀", tier:"coach"},
+  turniere:  {label:"Turniere",         icon:"🏆", tier:"coach"},
+  kasse:     {label:"Kasse",            icon:"💰", tier:"coach"},
+  spieler:   {label:"Spieler & Trainer",icon:"👥", tier:"coach"},
+  bibliothek:{label:"Bibliothek",       icon:"📚", tier:"coach"},
+  todos:     {label:"To-Dos",           icon:"📝", tier:"coach"},
+  treffen:   {label:"Trainertreffen",   icon:"🧑‍🏫", tier:"coach"},
+  team:      {label:"Team",             icon:"🏟", tier:"coach"},
+};
+const LOG_IGNORE = new Set(["updatedAt","createdAt","createdBy","createdByName","modifiedAt","seriesId"]);
+const LOG_FIELDS = {name:"Name",strength:"Stärke",active:"Status",jersey:"Trikot",notes:"Notizen",contacts:"Kontakte",birthYear:"Jahrgang",birthDate:"Geburtsdatum",vereinsmitglied:"Vereinsmitglied",spielerpass:"Spielerpass",phone:"Telefon",title:"Titel",description:"Beschreibung",date:"Datum",time:"Uhrzeit",startTime:"Beginn",duration:"Dauer",location:"Ort",hosting:"Ausrichter",amount:"Betrag",category:"Kategorie",type:"Art",exerciseIds:"Übungen",playerIds:"Anwesende",coachIds:"Trainer",teams:"Teams",weather:"Wetter",participantCount:"Teilnehmerzahl",planData:"Plan",focus:"Schwerpunkt",matches:"Spielplan/Ergebnisse",isDraft:"Status",done:"Erledigt",agenda:"Agenda",rsvpRule:"Anmeldeschluss"};
+const logVal = (k,v) => (k==="date"&&v)?fmtDate(v):(v===undefined||v===null||v===""?"–":String(v));
+const sessLabel = it => `Training am ${fmtDate(it.date)}${it.time?` · ${it.time} Uhr`:""}`;
+// Je Sammlung: Beschriftung, Kategorie, ggf. welche Felder für ALLE sichtbar sind (Termin-Daten) und welche nur für Trainer (Planung)
+const LOG_CFG = {
+  sessions:{ noun:"Trainings", label:sessLabel, cat:"training", pubCat:"termine", pubFields:["date","time","duration","location"], pubItem:it=>!it.isDraft },
+  tournaments:{ noun:"Turniere", label:t=>`Turnier „${t.name||""}"`, cat:"turniere", pubCat:"termine", pubFields:["name","date","startTime","location","hosting"], pubItem:()=>true },
+  recurringSlots:{ noun:"Trainingszeiten", label:s=>`Trainingszeit ${weekdayLabel(s.weekday)} ${s.time||""}`.trim(), cat:"termine" },
+  meetings:{ noun:"Trainertreffen", label:m=>`Trainertreff „${m.title||""}"${m.date?` am ${fmtDate(m.date)}`:""}`, cat:"treffen" },
+  players:{ noun:"Spieler", label:p=>`Spieler ${p.name||""}`, cat:"spieler" },
+  coaches:{ noun:"Trainer", label:c=>`Trainer ${c.name||""}`, cat:"spieler" },
+  exercises:{ noun:"Übungen", label:e=>`Übung „${e.title||""}"`, cat:"bibliothek" },
+  teamsets:{ noun:"Mannschaftsaufteilungen", label:t=>`Mannschaftsaufteilung „${t.name||t.title||""}"`, cat:"teams" },
+  kassenbuch:{ noun:"Kassenbuch-Einträge", label:k=>`Kasse: „${k.description||""}" (${k.type==="aus"?"Ausgabe":"Einnahme"} ${k.amount} €)`, cat:"kasse" },
+  todos:{ noun:"To-Dos", label:t=>`To-Do „${t.title||t.text||t.name||""}"`, cat:"todos" },
+};
+async function writeLog(groupId, user, cat, text, tierOverride) {
+  if(!fbDb||!groupId||!user||!text) return;
+  const tier = tierOverride || LOG_CATS[cat]?.tier || "coach";
+  const ms = Date.now();
+  const id = String(9999999999999-ms).padStart(13,"0")+"_"+Math.random().toString(36).slice(2,6);
+  try{ await setDoc(doc(fbDb,"groups",groupId,"log_"+tier,id),{ms,ts:new Date(ms).toISOString(),uid:user.uid,name:user.displayName||user.email||"",cat,text}); }catch(e){ console.warn("log",e); }
+}
+// Vergleicht alten und neuen Stand einer Sammlung und schreibt passende Log-Einträge
+function logDiff(groupId, user, key, prev, next) {
+  const cfg=LOG_CFG[key];
+  if(!cfg||!Array.isArray(prev)||!Array.isArray(next)) return;
+  const P=new Map(prev.filter(x=>x&&x.id).map(x=>[x.id,x]));
+  const N=new Map(next.filter(x=>x&&x.id).map(x=>[x.id,x]));
+  const added=[...N.values()].filter(x=>!P.has(x.id));
+  const removed=[...P.values()].filter(x=>!N.has(x.id));
+  const changed=[...N.values()].filter(x=>P.has(x.id)&&JSON.stringify(P.get(x.id))!==JSON.stringify(x));
+  const out=[]; // {cat,text}
+  const catOfItem=it=>cfg.pubCat&&cfg.pubItem(it)?cfg.pubCat:cfg.cat;
+  const bulk=(list,verb)=>{
+    const cats=[...new Set(list.map(catOfItem))];
+    cats.forEach(c=>{ const n=list.filter(x=>catOfItem(x)===c).length; out.push({cat:c,text:`${n} ${cfg.noun} ${verb}`}); });
+  };
+  if(added.length>5) bulk(added,"angelegt");
+  else added.forEach(it=>{
+    const draft=cfg.pubCat&&!cfg.pubItem(it);
+    out.push({cat:catOfItem(it),text:`${cfg.label(it)} ${draft?"als Entwurf ":""}angelegt`});
+    if(key==="sessions"&&((it.exerciseIds||[]).length||(it.playerIds||[]).length)&&!draft) out.push({cat:"training",text:`${cfg.label(it)}: Trainingsplan erstellt`});
+  });
+  if(removed.length>5) bulk(removed,"gelöscht");
+  else removed.forEach(it=>out.push({cat:catOfItem(it),text:`${cfg.label(it)} gelöscht`}));
+  if(changed.length>5) bulk(changed,"geändert");
+  else changed.forEach(it=>{
+    const old=P.get(it.id);
+    const keys=[...new Set([...Object.keys(old),...Object.keys(it)])].filter(k=>!LOG_IGNORE.has(k)&&JSON.stringify(old[k])!==JSON.stringify(it[k]));
+    if(!keys.length) return;
+    if(cfg.pubCat){
+      // Entwurf wird veröffentlicht: ab jetzt für alle sichtbarer Termin
+      if(key==="sessions"&&old.isDraft&&!it.isDraft){ out.push({cat:"termine",text:`${cfg.label(it)} angelegt`}); }
+      const pub=cfg.pubItem(it)&&cfg.pubItem(old);
+      const pubKeys=pub?keys.filter(k=>cfg.pubFields.includes(k)):[];
+      const restKeys=keys.filter(k=>!pubKeys.includes(k)&&!(key==="sessions"&&k==="isDraft"&&old.isDraft&&!it.isDraft));
+      if(pubKeys.length) out.push({cat:cfg.pubCat,text:`${cfg.label(it)} geändert: ${pubKeys.map(k=>`${LOG_FIELDS[k]||k}: ${logVal(k,old[k])} → ${logVal(k,it[k])}`).join("; ")}`});
+      if(restKeys.length) out.push({cat:cfg.cat,text:`${cfg.label(it)}: ${[...new Set(restKeys.map(k=>LOG_FIELDS[k]||"Details"))].join(", ")} geändert`});
+    } else {
+      const labels=[...new Set(keys.map(k=>LOG_FIELDS[k]||"Details"))];
+      out.push({cat:cfg.cat,text:`${cfg.label(it)} geändert (${labels.join(", ")})`});
+    }
+  });
+  out.forEach(e=>writeLog(groupId,user,e.cat,e.text));
+}
+// Log lesen: nur die Stufen, die die aktuelle Rolle sehen darf
+function useActivityLog(groupId, user, role) {
+  const [byTier,setByTier]=useState({all:[],coach:[],admin:[]});
+  const tiers = role==="admin"?["all","coach","admin"]:role==="trainer"?["all","coach"]:(role==="eltern"||role==="spieler")?["all"]:[];
+  const tierKey=tiers.join(",");
+  useEffect(()=>{
+    setByTier({all:[],coach:[],admin:[]});
+    if(!fbDb||!groupId||!user||!tiers.length) return;
+    const unsubs=tiers.map(t=>onSnapshot(query(collection(fbDb,"groups",groupId,"log_"+t),limit(150)),snap=>{
+      setByTier(prev=>({...prev,[t]:snap.docs.map(d=>({id:d.id,tier:t,...d.data()}))}));
+    },e=>console.warn("log",t,e)));
+    return ()=>unsubs.forEach(u=>u());
+  },[groupId,user?.uid,tierKey]); // eslint-disable-line
+  return tiers.flatMap(t=>byTier[t]).sort((a,b)=>(b.ms||0)-(a.ms||0));
+}
+
+// ── ANMELDESCHLUSS ────────────────────────────────────────────────
+// Pro Termin kann eine Frist gesetzt werden, bis zu der Eltern/Spieler zu- und absagen dürfen.
+// Gespeichert in groups/{gid}/eventMeta/{terminKey} (deadlineMs = Zeitpunkt in ms); Trainer/Admins können immer ändern.
+const fmtDeadline = ms => new Date(ms).toLocaleString("de-DE",{weekday:"short",day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})+" Uhr";
+const evStartMs = ev => { const [y,m,d]=ev.date.split("-").map(Number); const [hh,mm]=(ev.time||"00:00").split(":").map(Number); return new Date(y,m-1,d,hh||0,mm||0).getTime(); };
+const toLocalInput = ms => { const d=new Date(ms); const p=n=>String(n).padStart(2,"0"); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
+const DEADLINE_PRESETS = [
+  {k:"h2",  label:"2 Std. vor Beginn",  needsTime:true,  calc:ev=>evStartMs(ev)-2*3600e3},
+  {k:"h12", label:"12 Std. vor Beginn", needsTime:true,  calc:ev=>evStartMs(ev)-12*3600e3},
+  {k:"h24", label:"24 Std. vor Beginn", needsTime:true,  calc:ev=>evStartMs(ev)-24*3600e3},
+  {k:"eve", label:"Vorabend 18:00",     needsTime:false, calc:ev=>{const [y,m,d]=ev.date.split("-").map(Number);return new Date(y,m-1,d-1,18,0).getTime();}},
+];
+function useNow(ms=30000){ const [n,setN]=useState(Date.now()); useEffect(()=>{const t=setInterval(()=>setN(Date.now()),ms);return()=>clearInterval(t);},[ms]); return n; }
+function useEventMeta(groupId, user) {
+  const [meta,setMeta] = useState({});
+  const [loaded,setLoaded] = useState(false);
+  useEffect(()=>{
+    setMeta({}); setLoaded(false);
+    if(!fbDb || !groupId || !user){ return; }
+    const q = query(collection(fbDb,"groups",groupId,"eventMeta"), where("date",">=",todayISO()));
+    const unsub = onSnapshot(q, snap=>{ const m={}; snap.docs.forEach(d=>{ m[d.id]=d.data(); }); setMeta(m); setLoaded(true); }, e=>console.warn("eventMeta",e));
+    return unsub;
+  },[groupId,user?.uid]);
+  // ms = Zeitpunkt, null = Frist entfernen. opts.auto = aus der Serienregel abgeleitet (rollierend), opts.silent = nicht ins Aktivitätslog
+  const setDeadline = async (ev, ms, opts={}) => {
+    const ref = doc(fbDb,"groups",groupId,"eventMeta",ev.key);
+    const evName = ev.type==="training"?"Training":"Spieltag";
+    if(ms==null){ await deleteDoc(ref); if(!opts.silent) writeLog(groupId,user,"termine",`Anmeldeschluss für ${evName} am ${fmtDate(ev.date)} entfernt`); return; }
+    await setDoc(ref,{eventKey:ev.key,date:ev.date,deadlineMs:ms,auto:!!opts.auto,manual:!opts.auto,updatedBy:user.uid,updatedAt:new Date().toISOString()});
+    if(!opts.silent) writeLog(groupId,user,"termine",`Anmeldeschluss für ${evName} am ${fmtDate(ev.date)} gesetzt: ${fmtDeadline(ms)}`);
+  };
+  return {meta,setDeadline,loaded};
 }
 
 // ── ANMELDUNG: Daten & Hooks ──────────────────────────────────────
@@ -539,7 +681,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.31.1";
+const APP_VERSION = "3.34.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -1988,7 +2130,7 @@ function NotfallModal({exercises,onClose}) {
 }
 
 
-function SessionDetailView({s,players,coaches,exercises,onDelete,onClose,onSaveSession,onReplan,onPrint}) {
+function SessionDetailView({s,players,coaches,exercises,rsvps,onDelete,onClose,onSaveSession,onReplan,onPrint}) {
   const gP=id=>players.find(p=>p.id===id);
   const gC=id=>coaches.find(c=>c.id===id);
   const gE=id=>exercises.find(e=>e.id===id);
@@ -2024,6 +2166,18 @@ function SessionDetailView({s,players,coaches,exercises,onDelete,onClose,onSaveS
       <div style={{display:"flex",flexWrap:"wrap",gap:6}}>{tr.map(c=><span key={c.id} style={{fontSize:13,padding:"3px 10px",borderRadius:20,background:C.accentL,color:C.primary,fontWeight:700}}>🧑‍🏫 {c.name}</span>)}</div>
     </div>}
     {/* Players */}
+    {rsvps&&(()=>{
+      const key="tr-"+s.id, act=players.filter(p=>p.active!==false);
+      const st=p=>rsvps[rsvpKey(key,p.id)]?.status||null;
+      const yes=act.filter(p=>st(p)==="yes"), maybe=act.filter(p=>st(p)==="maybe"), no=act.filter(p=>st(p)==="no");
+      if(yes.length+maybe.length+no.length===0) return null;
+      const cur=s.playerIds||[];
+      const same=yes.length===cur.length&&yes.every(p=>cur.includes(p.id));
+      return(<div style={{marginBottom:14,background:"#f0fdf4",border:"1.5px solid #bbf7d0",borderRadius:10,padding:"10px 12px"}}>
+        <div style={{fontSize:12,fontWeight:800,color:"#166534",marginBottom:same||!onSaveSession?0:8}}>Anmeldungen: ✅ {yes.length} · 🤔 {maybe.length} · ❌ {no.length} · ⏳ {act.length-yes.length-maybe.length-no.length}</div>
+        {!same&&onSaveSession&&<Btn sm onClick={()=>onSaveSession({...s,playerIds:yes.map(p=>p.id)})}>✅ Zusagen als Anwesende übernehmen ({yes.length})</Btn>}
+      </div>);
+    })()}
     {pr.length>0&&<div style={{marginBottom:14}}>
       <div style={{fontSize:11,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Anwesend ({pr.length})</div>
       <div style={{display:"flex",flexWrap:"wrap",gap:4}}>{pr.map(p=><span key={p.id} style={{fontSize:12,padding:"3px 10px",borderRadius:20,background:STR[p.strength]?.light||"#f1f5f9",color:STR[p.strength]?.color||C.muted,fontWeight:600}}>{STR[p.strength]?.emoji} {p.name}</span>)}</div>
@@ -2906,7 +3060,7 @@ function MeetingForm({m,onSave,onClose}) {
 }
 
 // ── KALENDER (vereinheitlichte Terminübersicht) ─────────────────
-function CalendarPage({rsvps={},onSetRsvp,recurringSlots,onSaveSlot,onDeleteSlot,onGenerateSessions,pendingSetup,onClearPendingSetup,onOpenTurnierPage,sessions,meetings,tournaments,players,coaches,exercises,onSaveSession,onDeleteSession,onSavePlayer,onSaveMeeting,onDeleteMeeting,onSaveTournament,onSaveExercise,apiKey,toast,readOnly,onOpenTournament,pendingTarget,onClearPendingTarget,onlineUsers,currentUser,onGoHome,onGoBack}) {
+function CalendarPage({rsvps={},eventMeta={},onSetDeadline,onSetRsvp,recurringSlots,onSaveSlot,onDeleteSlot,onGenerateSessions,pendingSetup,onClearPendingSetup,onOpenTurnierPage,sessions,meetings,tournaments,players,coaches,exercises,onSaveSession,onDeleteSession,onSavePlayer,onSaveMeeting,onDeleteMeeting,onSaveTournament,onSaveExercise,apiKey,toast,readOnly,onOpenTournament,pendingTarget,onClearPendingTarget,onlineUsers,currentUser,onGoHome,onGoBack}) {
   const todayStr=todayISO();
   // Typ-Filter: Klick auf einen Typ zeigt NUR diesen Typ; erneuter Klick (oder "Alle") zeigt wieder alles
   const [typeFilter,setTypeFilter]=useState("all"); // all | training | spieltag | treffen
@@ -3029,12 +3183,17 @@ function CalendarPage({rsvps={},onSetRsvp,recurringSlots,onSaveSlot,onDeleteSlot
     </div>);
   };
 
+  // Anmeldeschluss per Schnellauswahl für genau diesen Termin setzen (Serientermine: überschreibt die Serienregel nur hier)
+  const applyPreset=async(ev,preset)=>{
+    try{ await onSetDeadline(ev,preset.calc(ev)); }
+    catch(e){ console.warn(e); toast("Speichern nicht möglich – bitte Berechtigung prüfen","warn"); }
+  };
   // Trainings & Spieltage in der Zukunft bekommen die Anmeldung (Zu-/Absagen) direkt unter dem Termin
   const renderItem=it=>{
     const card=renderItemBase(it);
     if(!onSetRsvp||readOnly||it.date<todayStr||(it.type!=="training"&&it.type!=="spieltag")||(it.type==="training"&&it.raw.isDraft)) return card;
-    const ev={key:(it.type==="training"?"tr-":"tn-")+it.raw.id,type:it.type==="training"?"training":"turnier",date:it.date};
-    return(<div key={it.id}>{card}<RsvpInline ev={ev} players={players} rsvps={rsvps} onSetRsvp={onSetRsvp} toast={toast}/></div>);
+    const ev={key:(it.type==="training"?"tr-":"tn-")+it.raw.id,type:it.type==="training"?"training":"turnier",date:it.date,time:it.type==="training"?(it.raw.time||""):(it.raw.hosting==="other"?"":(it.raw.startTime||""))};
+    return(<div key={it.id}>{card}<RsvpInline ev={ev} players={players} rsvps={rsvps} onSetRsvp={onSetRsvp} toast={toast} deadlineMs={eventMeta[ev.key]?.deadlineMs||null} onSetDeadline={onSetDeadline} onPreset={applyPreset} series={it.type==="training"&&it.raw.seriesId?{ruleLabel:DEADLINE_PRESETS.find(p=>p.k===(recurringSlots||[]).find(x=>x.id===it.raw.seriesId)?.rsvpRule)?.label||null,manual:!!eventMeta[ev.key]?.manual}:null} onOpenSlots={()=>setModal({type:"slots"})}/></div>);
   };
 
   return(<div>
@@ -3106,8 +3265,8 @@ function CalendarPage({rsvps={},onSetRsvp,recurringSlots,onSaveSlot,onDeleteSlot
           <div style={{display:"flex",flexDirection:"column",gap:8}}>{selectedDayItems.map(renderItem)}</div>}
       </div>}
 
-    {modal?.type==="sessionDetail"&&modal.data&&<Modal title={fmtDate(modal.data.date)} onClose={()=>setModal(null)} wide><SessionDetailView s={modal.data} players={players} coaches={coaches} exercises={exercises} onDelete={()=>{onDeleteSession(modal.data.id);setModal(null);}} onClose={()=>setModal(null)} onSaveSession={onSaveSession} onPrint={()=>printSession(modal.data,exercises,toast)} onReplan={()=>setModal({type:"setup",continueSessionId:modal.data.id})}/></Modal>}
-    {modal?.type==="setup"&&<Modal title="Training planen" onClose={()=>setModal(null)} wide><NewTrainingWizard sessions={sessions} players={players} exercises={exercises} initialSetup={modal.setup} initialSessionId={modal.continueSessionId} startStep={modal.continueSessionId?2:1} onSaveSession={s=>{onSaveSession(s);setModal(null);toast("Training gespeichert");}} onSavePlayer={onSavePlayer} onClose={()=>setModal(null)}/></Modal>}
+    {modal?.type==="sessionDetail"&&modal.data&&<Modal title={fmtDate(modal.data.date)} onClose={()=>setModal(null)} wide><SessionDetailView s={modal.data} rsvps={rsvps} players={players} coaches={coaches} exercises={exercises} onDelete={()=>{onDeleteSession(modal.data.id);setModal(null);}} onClose={()=>setModal(null)} onSaveSession={s2=>{onSaveSession(s2);setModal(m=>m&&m.type==="sessionDetail"?{...m,data:s2}:m);}} onPrint={()=>printSession(modal.data,exercises,toast)} onReplan={()=>setModal({type:"setup",continueSessionId:modal.data.id})}/></Modal>}
+    {modal?.type==="setup"&&<Modal title="Training planen" onClose={()=>setModal(null)} wide><NewTrainingWizard sessions={sessions} players={players} exercises={exercises} rsvps={rsvps} initialSetup={modal.setup} initialSessionId={modal.continueSessionId} startStep={modal.continueSessionId?2:1} onSaveSession={s=>{onSaveSession(s);setModal(null);toast("Training gespeichert");}} onSavePlayer={onSavePlayer} onClose={()=>setModal(null)}/></Modal>}
     {modal?.type==="meetingDetail"&&modal.data&&<Modal title={modal.data.title||"Trainertreff"} onClose={()=>setModal(null)} wide><MeetingCard m={modal.data} initialOpen onEdit={()=>setModal({type:"meetingForm",data:modal.data})} onDel={()=>{onDeleteMeeting(modal.data.id);setModal(null);}} onSave={m=>{onSaveMeeting(m);setModal({type:"meetingDetail",data:m});}} readOnly={readOnly}/></Modal>}
     {modal?.type==="slots"&&<Modal title="Trainingszeiten" onClose={()=>setModal(null)} wide><RecurringSlotsTab slots={recurringSlots||[]} sessions={sessions} onSaveSlot={onSaveSlot} onDeleteSlot={onDeleteSlot} onGenerateSessions={onGenerateSessions} toast={toast}/></Modal>}
     {modal?.type==="notfall"&&<Modal title="🚨 SOS-Notfall-Plan" onClose={()=>setModal(null)} wide><NotfallModal exercises={exercises} onClose={()=>setModal(null)}/></Modal>}
@@ -3150,7 +3309,7 @@ function RecurringSlotsTab({slots,sessions,onSaveSlot,onDeleteSlot,onGenerateSes
         <div style={{fontSize:22}}>🔁</div>
         <div style={{flex:1,minWidth:0}}>
           <div style={{fontWeight:700,fontSize:14,color:C.text}}>{weekdayLabel(s.weekday)} · {s.time||"–"} Uhr</div>
-          <div style={{fontSize:12,color:C.muted,marginTop:2}}>⏱ {s.duration||60} Min{s.location?` · 📍 ${s.location}`:""}</div>
+          <div style={{fontSize:12,color:C.muted,marginTop:2}}>⏱ {s.duration||60} Min{s.location?` · 📍 ${s.location}`:""}{s.rsvpRule&&DEADLINE_PRESETS.find(p=>p.k===s.rsvpRule)?` · ⏰ Anmeldeschluss ${DEADLINE_PRESETS.find(p=>p.k===s.rsvpRule).label}`:""}</div>
         </div>
         <button onClick={e=>{e.stopPropagation();del(s);}} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",padding:4,flexShrink:0}}><Trash2 size={15}/></button>
       </div>
@@ -3169,6 +3328,7 @@ function SlotForm({slot,onSave,onClose}) {
   const [time,setTime]=useState(slot?.time||"16:00");
   const [duration,setDuration]=useState(slot?.duration||60);
   const [location,setLocation]=useState(slot?.location||"");
+  const [rsvpRule,setRsvpRule]=useState(slot?.rsvpRule||"");
   return(<div>
     <Sel label="Wochentag" value={weekday} onChange={e=>setWeekday(Number(e.target.value))}>
       {WEEKDAYS.map(w=><option key={w.v} value={w.v}>{w.l}</option>)}
@@ -3178,9 +3338,14 @@ function SlotForm({slot,onSave,onClose}) {
       <Inp label="Dauer (Min)" type="number" min={15} value={duration} onChange={e=>setDuration(Number(e.target.value))}/>
     </div>
     <Inp label="Ort" value={location} onChange={e=>setLocation(e.target.value)} placeholder="Sportplatz..."/>
+    <Sel label="Anmeldeschluss (rollierend)" value={rsvpRule} onChange={e=>setRsvpRule(e.target.value)}>
+      <option value="">Kein Anmeldeschluss</option>
+      {DEADLINE_PRESETS.map(p=><option key={p.k} value={p.k}>{p.label}</option>)}
+    </Sel>
+    <div style={{fontSize:11,color:C.muted,margin:"-6px 0 10px"}}>Gilt automatisch für jeden Termin dieser Serie, jeweils relativ zum Termin. Einzelne Termine lassen sich später separat ändern.</div>
     <div style={{display:"flex",gap:10,justifyContent:"flex-end",paddingTop:16,borderTop:`1px solid ${C.border}`}}>
       <Btn onClick={onClose} variant="secondary">Abbrechen</Btn>
-      <Btn onClick={()=>onSave({id:slot?.id||uid(),weekday,time,duration,location,createdAt:slot?.createdAt||now()})}>{slot?.id?"Speichern":"Anlegen"}</Btn>
+      <Btn onClick={()=>onSave({id:slot?.id||uid(),weekday,time,duration,location,rsvpRule,createdAt:slot?.createdAt||now()})}>{slot?.id?"Speichern":"Anlegen"}</Btn>
     </div>
   </div>);
 }
@@ -3210,7 +3375,7 @@ function GenerateSessionsModal({slots,sessions,onGenerate,onClose}) {
   </div>);
 }
 
-function NewTrainingWizard({sessions,players,exercises,initialSetup,initialSessionId,startStep,onSaveSession,onSavePlayer,onClose}) {
+function NewTrainingWizard({sessions,players,exercises,rsvps={},initialSetup,initialSessionId,startStep,onSaveSession,onSavePlayer,onClose}) {
   const todayStr=todayISO();
   const upcoming=[...sessions].filter(s=>s.date>=todayStr&&(!s.playerIds||s.playerIds.length===0)&&(!s.exerciseIds||s.exerciseIds.length===0)).sort((a,b)=>a.date.localeCompare(b.date)||(a.time||"").localeCompare(b.time||""));
   const initSession=initialSessionId?sessions.find(s=>s.id===initialSessionId):null;
@@ -3291,6 +3456,19 @@ function NewTrainingWizard({sessions,players,exercises,initialSetup,initialSessi
 
     {step===2&&<div>
       <label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Spieler <span style={{fontWeight:400,textTransform:"none"}}>(optional – Weiter zum Überspringen)</span></label>
+      {selectedSessionId&&(()=>{
+        const key="tr-"+selectedSessionId, act=players.filter(p=>p.active!==false);
+        const st=p=>rsvps[rsvpKey(key,p.id)]?.status||null;
+        const yes=act.filter(p=>st(p)==="yes"), maybe=act.filter(p=>st(p)==="maybe"), no=act.filter(p=>st(p)==="no");
+        if(yes.length+maybe.length+no.length===0) return null;
+        return(<div style={{background:"#f0fdf4",border:"1.5px solid #bbf7d0",borderRadius:10,padding:"10px 12px",marginBottom:12}}>
+          <div style={{fontSize:12,fontWeight:800,color:"#166534",marginBottom:8}}>Anmeldungen: ✅ {yes.length} · 🤔 {maybe.length} · ❌ {no.length} · ⏳ {act.length-yes.length-maybe.length-no.length}</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <Btn sm onClick={()=>setPlayerIds(yes.map(p=>p.id))}>✅ Zusagen übernehmen ({yes.length})</Btn>
+            {maybe.length>0&&<Btn sm variant="secondary" onClick={()=>setPlayerIds([...yes,...maybe].map(p=>p.id))}>+ Unsichere mitnehmen ({yes.length+maybe.length})</Btn>}
+          </div>
+        </div>);
+      })()}
       <div style={{marginBottom:14}}>
         <PlayerList players={players} selPlayers={playerIds} setSelPlayers={setPlayerIds} showStrength/>
       </div>
@@ -4417,7 +4595,8 @@ function TeamsCard({user,groupId,memberships,onSwitchGroup,toast,canRename=false
     if(!n||!groupId) return;
     if(n===nameOf(groupId)){ setModal(null); return; }
     setBusy(true);
-    try{ await setDoc(doc(fbDb,"groups",groupId),{name:n.slice(0,60)},{merge:true}); toast("Team umbenannt ✓"); setModal(null); }
+    const oldName=nameOf(groupId);
+    try{ await setDoc(doc(fbDb,"groups",groupId),{name:n.slice(0,60)},{merge:true}); writeLog(groupId,user,"team",`Team umbenannt: „${oldName}" → „${n.slice(0,60)}"`,"all"); toast("Team umbenannt ✓"); setModal(null); }
     catch(e){ console.warn(e); toast("Umbenennen nicht möglich – bitte Berechtigung prüfen","err"); }
     setBusy(false);
   };
@@ -4482,19 +4661,31 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
   },[groupId,isCoach]);
   const joinRequests=useJoinRequests(groupId, canManage);
   const linkMember=linkFor?members.find(x=>x.uid===linkFor):null;
+  // Rollen eines Mitglieds setzen (mehrere möglich). "role" = höchste Rolle, "roles" = alle.
+  const setMemberRoles=(m,nr)=>{
+    if(!nr.length) return;
+    const sorted=ROLE_ORDER.filter(x=>nr.includes(x)), old=memberRoles(m);
+    const lab=l=>l.map(x=>USER_ROLES[x]?.label||x).join(" + ");
+    setDoc(doc(fbDb,"groups",groupId,"members",m.uid),{role:primaryRole(sorted),roles:sorted},{merge:true})
+      .then(()=>writeLog(groupId,firebaseUser,"team",`${m.name||m.email}: Rollen ${lab(old)} → ${lab(sorted)}`,"coach"))
+      .catch(()=>toast("Rollen konnten nicht gespeichert werden","warn"));
+  };
   const toggleChild=(m,pid)=>{
     const ids=m.childIds||[];
     setDoc(doc(fbDb,"groups",groupId,"members",m.uid),{childIds:ids.includes(pid)?ids.filter(x=>x!==pid):[...ids,pid]},{merge:true})
       .catch(()=>toast("Verknüpfung konnte nicht gespeichert werden","warn"));
   };
   const linkModal=linkMember&&(()=>{
-    const isPlayer=linkMember.role==="spieler";
+    const mrl=memberRoles(linkMember);
+    const isPlayer=mrl.includes("spieler")&&!mrl.includes("eltern");
     const em=(linkMember.email||"").trim().toLowerCase();
     const nm=(linkMember.name||"").trim().toLowerCase();
     const suggested=p=>(em&&(p.contacts||[]).some(c=>(c.email||"").trim().toLowerCase()===em))||(nm&&(p.name||"").trim().toLowerCase()===nm);
     const linkedBy=p=>members.filter(x=>x.uid!==linkMember.uid&&(x.childIds||[]).includes(p.id)).map(x=>x.name||x.email);
     const list=[...players].sort((a,b)=>(suggested(b)?1:0)-(suggested(a)?1:0)||(b.active!==false)-(a.active!==false)||linkedBy(a).length-linkedBy(b).length||(a.name||"").localeCompare(b.name||""));
-    const setIds=ids=>setDoc(doc(fbDb,"groups",groupId,"members",linkMember.uid),{childIds:ids},{merge:true}).catch(()=>toast("Verknüpfung konnte nicht gespeichert werden","warn"));
+    const setIds=ids=>setDoc(doc(fbDb,"groups",groupId,"members",linkMember.uid),{childIds:ids},{merge:true})
+      .then(()=>writeLog(groupId,firebaseUser,"team",`${linkMember.name||linkMember.email}: verknüpft mit ${players.filter(p=>ids.includes(p.id)).map(p=>p.name).join(", ")||"niemandem"}`,"coach"))
+      .catch(()=>toast("Verknüpfung konnte nicht gespeichert werden","warn"));
     const ids=linkMember.childIds||[];
     const pick=pid=>{ if(isPlayer) setIds(ids.includes(pid)?[]:[pid]); else setIds(ids.includes(pid)?ids.filter(x=>x!==pid):[...ids,pid]); };
     const createProfile=()=>{
@@ -4548,8 +4739,8 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
               <div style={{fontWeight:700,fontSize:13,color:C.text}}>{r.name||r.email}</div>
               <div style={{fontSize:11,color:C.muted}}>{r.email}{r.requestedRole&&r.requestedRole!=="eltern"?` · möchte ${USER_ROLES[r.requestedRole]?.label||r.requestedRole} sein`:""}</div>
             </div>
-            <button onClick={()=>approveJoinRequest(groupId,r.uid,r.requestedRole||"eltern")} style={{padding:"6px 10px",borderRadius:8,border:"none",background:"#22c55e",color:"white",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✓ {r.requestedRole==="trainer"?"Als Trainer annehmen":r.requestedRole==="spieler"?"Als Spieler annehmen":"Annehmen"}</button>
-            <button onClick={()=>rejectJoinRequest(groupId,r.uid)} style={{padding:"6px 10px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",color:"#ef4444",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✕</button>
+            <button onClick={()=>{approveJoinRequest(groupId,r.uid,r.requestedRole||"eltern");writeLog(groupId,firebaseUser,"team",`${r.name||r.email} ins Team aufgenommen (${USER_ROLES[r.requestedRole||"eltern"]?.label})`,"coach");}} style={{padding:"6px 10px",borderRadius:8,border:"none",background:"#22c55e",color:"white",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✓ {r.requestedRole==="trainer"?"Als Trainer annehmen":r.requestedRole==="spieler"?"Als Spieler annehmen":"Annehmen"}</button>
+            <button onClick={()=>{rejectJoinRequest(groupId,r.uid);writeLog(groupId,firebaseUser,"team",`Beitrittswunsch von ${r.name||r.email} abgelehnt`,"coach");}} style={{padding:"6px 10px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",color:"#ef4444",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✕</button>
           </div>)}
         </div>
       </div>}
@@ -4558,25 +4749,25 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
         <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>Team-Mitglieder ({members.length})</div>
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
           {members.map(m=>{
-            const r=USER_ROLES[m.role||"eltern"]||USER_ROLES.eltern;
+            const mr=memberRoles(m);
             const isSelf=m.uid===firebaseUser?.uid;
-            return(<div key={m.uid} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:10,background:C.card,border:`1.5px solid ${C.border}`}}>
+            return(<div key={m.uid} style={{display:"flex",alignItems:"center",flexWrap:"wrap",gap:10,padding:"10px 14px",borderRadius:10,background:C.card,border:`1.5px solid ${C.border}`}}>
               {m.photo?<img src={m.photo} width={32} height={32} style={{borderRadius:"50%",flexShrink:0}}/>:<div style={{width:32,height:32,borderRadius:"50%",background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,color:C.primary,flexShrink:0}}>{(m.name||"?")[0].toUpperCase()}</div>}
               <div style={{flex:1,minWidth:0}}>
                 <div style={{fontWeight:700,fontSize:13,color:C.text}}>{m.name||m.email}{isSelf&&<span style={{fontSize:11,color:C.muted}}> (du)</span>}</div>
-                {isFamily(m.role||"eltern")&&!(m.childIds||[]).length&&<div style={{fontSize:11,color:"#b45309",marginTop:2}}>⚠ noch nicht mit {m.role==="spieler"?"einem Spielerprofil":"einem Kind"} verknüpft</div>}
+                {mr.some(isFamily)&&!(m.childIds||[]).length&&<div style={{fontSize:11,color:"#b45309",marginTop:2}}>⚠ noch nicht mit {mr.includes("spieler")&&!mr.includes("eltern")?"einem Spielerprofil":"einem Kind"} verknüpft</div>}
               </div>
-              {!canManage&&<span style={{padding:"5px 10px",borderRadius:8,border:`1.5px solid ${r.color}`,background:r.bg,color:r.color,fontWeight:700,fontSize:12}}>{r.emoji} {r.label}</span>}
-              {canManage&&<select value={m.role||"eltern"} disabled={isSelf}
-                onChange={e=>setDoc(doc(fbDb,"groups",groupId,"members",m.uid),{role:e.target.value},{merge:true})}
-                style={{padding:"5px 10px",borderRadius:8,border:`1.5px solid ${r.color}`,background:r.bg,color:r.color,fontWeight:700,fontSize:12,cursor:isSelf?"default":"pointer",fontFamily:"inherit",outline:"none"}}>
-                <option value="admin">👑 Admin</option>
-                <option value="trainer">🧑‍🏫 Trainer</option>
-                <option value="eltern">👪 Eltern</option>
-                <option value="spieler">⚽ Spieler</option>
-              </select>}
-              {isFamily(m.role||"eltern")&&<button title={m.role==="spieler"?"Spielerprofil verknüpfen":"Kinder verknüpfen"} onClick={()=>setLinkFor(m.uid)} style={{padding:"5px 8px",borderRadius:8,border:`1.5px solid ${C.border}`,background:(m.childIds||[]).length?C.accentL:C.card,cursor:"pointer",color:C.text,fontSize:12,fontWeight:700,flexShrink:0,fontFamily:"inherit"}}>{m.role==="spieler"?"⚽":"👶"} {(m.childIds||[]).length||"+"}</button>}
-              {!isSelf&&canManage&&<button title="Aus Team entfernen" onClick={()=>{if(window.confirm(`${m.name||m.email} aus dem Team entfernen?`))deleteDoc(doc(fbDb,"groups",groupId,"members",m.uid));}} style={{padding:"5px 8px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",cursor:"pointer",color:"#ef4444",fontSize:12,flexShrink:0}}>🗑</button>}
+              {!canManage&&<div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{mr.map(k=>{const rr=USER_ROLES[k]||USER_ROLES.eltern;return <span key={k} style={{padding:"4px 10px",borderRadius:20,border:`1.5px solid ${rr.color}`,background:rr.bg,color:rr.color,fontWeight:700,fontSize:12}}>{rr.emoji} {rr.label}</span>;})}</div>}
+              {canManage&&<div style={{display:"flex",gap:6,flexWrap:"wrap",flexBasis:"100%",order:5,paddingLeft:42}}>
+                {ROLE_ORDER.map(k=>{
+                  const rr=USER_ROLES[k], on=mr.includes(k);
+                  const dis=(isSelf&&k==="admin"&&on)||(on&&mr.length===1); // eigene Admin-Rolle und die letzte Rolle bleiben
+                  return <button key={k} disabled={dis} title={dis?"Diese Rolle kann nicht entfernt werden":""} onClick={()=>setMemberRoles(m,on?mr.filter(x=>x!==k):[...mr,k])}
+                    style={{padding:"4px 10px",borderRadius:20,border:`1.5px solid ${on?rr.color:C.border}`,background:on?rr.bg:C.card,color:on?rr.color:C.muted,fontWeight:700,fontSize:12,cursor:dis?"default":"pointer",opacity:dis&&!on?.5:1,fontFamily:"inherit"}}>{rr.emoji} {rr.label}</button>;
+                })}
+              </div>}
+              {<button title={mr.includes("spieler")&&!mr.includes("eltern")?"Spielerprofil verknüpfen":"Kinder verknüpfen"} onClick={()=>setLinkFor(m.uid)} style={{padding:"5px 8px",borderRadius:8,border:`1.5px solid ${C.border}`,background:(m.childIds||[]).length?C.accentL:C.card,cursor:"pointer",color:C.text,fontSize:12,fontWeight:700,flexShrink:0,fontFamily:"inherit"}}>{mr.includes("spieler")&&!mr.includes("eltern")?"⚽":"👶"} {(m.childIds||[]).length||"+"}</button>}
+              {!isSelf&&canManage&&<button title="Aus Team entfernen" onClick={()=>{if(window.confirm(`${m.name||m.email} aus dem Team entfernen?`)){deleteDoc(doc(fbDb,"groups",groupId,"members",m.uid));writeLog(groupId,firebaseUser,"team",`${m.name||m.email} aus dem Team entfernt`,"coach");}}} style={{padding:"5px 8px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",cursor:"pointer",color:"#ef4444",fontSize:12,flexShrink:0}}>🗑</button>}
             </div>);
           })}
         </div>
@@ -5061,10 +5252,11 @@ function Nav({page,setPage,counts}) {
     {key:"teamplaner",icon:Shuffle,  label:"Teams",       count:counts.teamsets},
     {key:"kasse",    icon:Wallet,    label:"Kasse"},
     {key:"orga",     icon:ClipboardList,label:"To Dos",count:counts.openTodos},
+    {key:"log",      icon:ListChecks,label:"Aktivität"},
     {key:"settings", icon:Settings,  label:"Einstellungen",alert:counts.pendingCount>0},
   ];
   const visible=allItems.filter(i=>can(counts.role,i.key)||(i.key==="settings"&&(counts.role==="trainer"||isFamily(counts.role))));
-  const MAIN_KEYS=isFamily(counts.role)?["start","calendar","settings"]:["start","calendar","library","teamplaner"];
+  const MAIN_KEYS=isFamily(counts.role)?["start","calendar","log","settings"]:["start","calendar","library","teamplaner"];
   const mainItems=visible.filter(i=>MAIN_KEYS.includes(i.key));
   const moreItems=visible.filter(i=>!MAIN_KEYS.includes(i.key));
   const moreActive=moreItems.some(i=>i.key===page);
@@ -5076,7 +5268,7 @@ function Nav({page,setPage,counts}) {
     {label:"Training",  keys:["library","teamplaner"]},
     {label:"Mannschaft",keys:["team"]},
     {label:"Verwaltung",keys:["kasse","orga"]},
-    {label:"Sonstiges", keys:["settings"]},
+    {label:"Sonstiges", keys:["log","settings"]},
   ];
 
   const navBtn=(item)=>{
@@ -5193,9 +5385,12 @@ function ParentStartPage({role,currentUser,events,myKids,rsvps,openRsvps,onNavig
   </div>);
 }
 
-// ── ANMELDUNG im Termin (Trainer/Admin): Zähler + aufklappbare Spielerliste mit Statusfiltern ──
-function RsvpInline({ev,players,rsvps,onSetRsvp,toast}) {
+// ── ANMELDUNG im Termin (Trainer/Admin): Zähler, Anmeldeschluss + aufklappbare Spielerliste mit Statusfiltern ──
+function RsvpInline({ev,players,rsvps,onSetRsvp,toast,deadlineMs,onSetDeadline,onPreset,series,onOpenSlots}) {
   const [open,setOpen]=useState(false);
+  const [editDl,setEditDl]=useState(false);
+  const [dlInput,setDlInput]=useState("");
+  const now=useNow();
   const [filter,setFilterRaw]=useState(()=>{try{return sessionStorage.getItem("rsvpFilter")||"all";}catch(e){return "all";}});
   const [pinned,setPinned]=useState(()=>new Set()); // eben geänderte Spieler bleiben sichtbar, damit die Liste nicht springt
   const setFilter=f=>{setFilterRaw(f);setPinned(new Set());try{sessionStorage.setItem("rsvpFilter",f);}catch(e){}};
@@ -5203,14 +5398,19 @@ function RsvpInline({ev,players,rsvps,onSetRsvp,toast}) {
   if(active.length===0) return null;
   const stOf=p=>rsvps[rsvpKey(ev.key,p.id)]?.status||null;
   const yes=active.filter(p=>stOf(p)==="yes"), maybe=active.filter(p=>stOf(p)==="maybe"), no=active.filter(p=>stOf(p)==="no"), openL=active.filter(p=>!stOf(p));
+  // Trainer/Admins dürfen immer antworten – auch nach Ablauf des Anmeldeschlusses
   const save=async(e2,pid,status,note)=>{
     setPinned(prev=>new Set(prev).add(pid));
     try{ await onSetRsvp(e2,pid,status,note); }
     catch(e){ console.warn("rsvp",e); toast("Speichern nicht möglich – bitte Berechtigung prüfen","warn"); }
   };
+  const closed=!!deadlineMs&&now>deadlineMs;
+  const presets=DEADLINE_PRESETS.filter(p=>!p.needsTime||ev.time);
   const filters=[{k:"all",l:"Alle",n:active.length},{k:"yes",l:"✅ Dabei",n:yes.length},{k:"maybe",l:"🤔 Unsicher",n:maybe.length},{k:"no",l:"❌ Nicht dabei",n:no.length},{k:"open",l:"⏳ Keine Antwort",n:openL.length}];
   const visible=active.filter(p=>{const st=stOf(p);return filter==="all"||(filter==="open"?!st:st===filter)||pinned.has(p.id);});
   const noted=[...no,...maybe].filter(p=>rsvps[rsvpKey(ev.key,p.id)]?.note);
+  const small={padding:"4px 10px",borderRadius:20,border:`1.5px solid ${C.border}`,background:C.card,color:C.text,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"};
+  const setDl=async ms=>{ try{ await onSetDeadline(ev,ms); toast(ms==null?"Anmeldeschluss entfernt":"Anmeldeschluss gesetzt ✓"); setEditDl(false); }catch(e){ console.warn(e); toast("Speichern nicht möglich – bitte Berechtigung prüfen","warn"); } };
   return(<div style={{marginTop:4}}>
     <div onClick={()=>{setOpen(o=>!o);setPinned(new Set());}} style={{display:"flex",alignItems:"center",gap:14,fontSize:13,fontWeight:800,padding:"6px 8px",cursor:"pointer"}}>
       <span style={{fontSize:11,color:C.muted,fontWeight:700}}>Anmeldung</span>
@@ -5222,12 +5422,68 @@ function RsvpInline({ev,players,rsvps,onSetRsvp,toast}) {
     </div>
     {!open&&noted.length>0&&<div style={{fontSize:12,color:C.muted,padding:"0 8px 6px"}}>{noted.map(p=>`${p.name}: ${rsvps[rsvpKey(ev.key,p.id)].note}`).join(" · ")}</div>}
     {open&&<div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"10px 14px",marginTop:2}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",fontSize:12,color:closed?"#b91c1c":C.muted,marginBottom:8}}>
+        <span>{deadlineMs?(closed?`🔒 Anmeldeschluss war ${fmtDeadline(deadlineMs)} – Eltern/Spieler können nicht mehr ändern, du schon`:`⏰ Anmeldung für Eltern/Spieler bis ${fmtDeadline(deadlineMs)}`):"⏰ Kein Anmeldeschluss"}</span>
+        {onSetDeadline&&<button onClick={()=>{setDlInput(toLocalInput(deadlineMs||evStartMs(ev)-2*3600e3));setEditDl(v=>!v);}} style={small}>{deadlineMs?"Ändern":"Festlegen"}</button>}
+      </div>
+      {series&&<div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",fontSize:12,color:C.muted,marginBottom:8}}>
+        <span>🔁 Serientermin: {series.ruleLabel?`Der Anmeldeschluss folgt automatisch der Serienregel („${series.ruleLabel}").`:"Für die Serie ist kein automatischer Anmeldeschluss festgelegt."}</span>
+        {onOpenSlots&&<button onClick={onOpenSlots} style={small}>Serienregel ändern</button>}
+        {series.manual&&<button onClick={()=>setDl(null)} style={small}>Zurück zur Serienregel</button>}
+      </div>}
+      {editDl&&<div style={{background:C.bg,border:`1.5px solid ${C.border}`,borderRadius:10,padding:"10px 12px",marginBottom:10}}>
+        <div style={{fontSize:12,fontWeight:700,color:C.muted,marginBottom:6}}>{series?"Nur für diesen Termin ändern":"Schnellauswahl"}</div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {presets.map(p=><button key={p.k} onClick={()=>onPreset(ev,p)} style={small}>{p.label}</button>)}
+        </div>
+        <div style={{fontSize:12,fontWeight:700,color:C.muted,margin:"10px 0 6px"}}>Oder genaue Zeit</div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+          <input type="datetime-local" value={dlInput} onChange={e=>setDlInput(e.target.value)} style={{padding:"7px 10px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,color:C.text,background:C.card,fontFamily:"inherit"}}/>
+          <Btn sm onClick={()=>{const ms=new Date(dlInput).getTime();if(!isNaN(ms))setDl(ms);}}>Speichern</Btn>
+          {deadlineMs&&<Btn sm variant="secondary" onClick={()=>setDl(null)}>Frist entfernen</Btn>}
+        </div>
+      </div>}
       <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:4}}>
         {filters.map(f=><button key={f.k} onClick={()=>setFilter(f.k)} style={{padding:"5px 10px",borderRadius:20,border:`1.5px solid ${filter===f.k?C.primary:C.border}`,background:filter===f.k?C.accentL:C.card,color:filter===f.k?C.primary:C.muted,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{f.l} {f.n}</button>)}
       </div>
       {visible.length===0&&<div style={{fontSize:13,color:C.muted,padding:"10px 0"}}>Keine Spieler in dieser Auswahl.</div>}
       {visible.map(p=><RsvpKidRow key={p.id} kid={p} ev={ev} rsvp={rsvps[rsvpKey(ev.key,p.id)]} onSave={save} compact/>)}
     </div>}
+  </div>);
+}
+
+// ── AKTIVITÄTSSEITE ───────────────────────────────────────────────
+function ActivityPage({entries,onlineUsers,currentUser,onGoHome,onGoBack}) {
+  const [filter,setFilter]=useState("all");
+  const cats=[...new Set(entries.map(e=>e.cat))];
+  const list=entries.filter(e=>filter==="all"||e.cat===filter);
+  const dayLabel=ms=>{
+    const d=new Date(ms), t=new Date(); const same=(a,b)=>a.toDateString()===b.toDateString();
+    const y=new Date(); y.setDate(t.getDate()-1);
+    if(same(d,t)) return "Heute"; if(same(d,y)) return "Gestern";
+    return d.toLocaleDateString("de-DE",{weekday:"long",day:"2-digit",month:"long"});
+  };
+  const groups=[]; list.forEach(e=>{ const l=dayLabel(e.ms||0); const g=groups[groups.length-1]; if(g&&g.label===l) g.items.push(e); else groups.push({label:l,items:[e]}); });
+  const chip=(k,l)=><button key={k} onClick={()=>setFilter(k)} style={{padding:"5px 12px",borderRadius:20,border:`1.5px solid ${filter===k?C.primary:C.border}`,background:filter===k?C.accentL:C.card,color:filter===k?C.primary:C.muted,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{l}</button>;
+  return(<div>
+    <PageHeader title="Aktivität" sub="Was sich im Team geändert hat" onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
+    {cats.length>1&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
+      {chip("all","Alle")}
+      {cats.map(c=>chip(c,`${LOG_CATS[c]?.icon||"•"} ${LOG_CATS[c]?.label||c}`))}
+    </div>}
+    {list.length===0&&<div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted}}>Noch keine Änderungen aufgezeichnet.</div>}
+    {groups.map(g=><div key={g.label} style={{marginBottom:16}}>
+      <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>{g.label}</div>
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        {g.items.map(e=><div key={e.tier+e.id} style={{display:"flex",gap:10,alignItems:"flex-start",background:C.card,borderRadius:10,border:`1.5px solid ${C.border}`,padding:"9px 12px"}}>
+          <div style={{fontSize:18,lineHeight:"22px",flexShrink:0}}>{LOG_CATS[e.cat]?.icon||"•"}</div>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:13,color:C.text,fontWeight:600,wordBreak:"break-word"}}>{e.text}</div>
+            <div style={{fontSize:11,color:C.muted,marginTop:2}}>{e.name||"?"} · {new Date(e.ms||0).toLocaleTimeString("de-DE",{hour:"2-digit",minute:"2-digit"})} Uhr{e.tier==="coach"?" · 🔒 nur Trainer":e.tier==="admin"?" · 🔒 nur Admins":""}</div>
+          </div>
+        </div>)}
+      </div>
+    </div>)}
   </div>);
 }
 
@@ -5242,10 +5498,10 @@ function RsvpEventHead({ev}) {
   </div>);
 }
 
-function RsvpKidRow({kid,ev,rsvp,onSave,compact,showName=true}) {
+function RsvpKidRow({kid,ev,rsvp,onSave,compact,showName=true,locked=false}) {
   const st = rsvp?.status || null;
   const btn=(val,label,col,bg)=>(
-    <button onClick={()=>onSave(ev,kid.id,st===val?null:val,val!=="yes"?(rsvp?.note||""):"")} style={{flex:1,minWidth:0,padding:compact?"6px 2px":"10px 2px",borderRadius:10,border:`2px solid ${st===val?col:C.border}`,background:st===val?bg:C.card,color:st===val?col:C.muted,fontWeight:800,fontSize:compact?11:13,cursor:"pointer",fontFamily:"inherit"}}>{label}</button>
+    <button disabled={locked} onClick={()=>{if(!locked)onSave(ev,kid.id,st===val?null:val,val!=="yes"?(rsvp?.note||""):"");}} style={{opacity:locked&&st!==val?.45:1,flex:1,minWidth:0,padding:compact?"6px 2px":"10px 2px",borderRadius:10,border:`2px solid ${st===val?col:C.border}`,background:st===val?bg:C.card,color:st===val?col:C.muted,fontWeight:800,fontSize:compact?11:13,cursor:locked?"default":"pointer",fontFamily:"inherit"}}>{label}</button>
   );
   return(<div style={{padding:compact?"8px 0":"10px 0"}}>
     {showName&&<div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:6}}>{kid.name}</div>}
@@ -5254,22 +5510,23 @@ function RsvpKidRow({kid,ev,rsvp,onSave,compact,showName=true}) {
       {btn("maybe","🤔 Unsicher","#b45309","#fef3c7")}
       {btn("no","❌ Nicht dabei","#dc2626","#fee2e2")}
     </div>
-    {(st==="no"||st==="maybe")&&<input key={rsvp?.note||""} defaultValue={rsvp?.note||""} placeholder={st==="maybe"?"Anmerkung (optional)":"Grund (optional, z. B. krank)"}
+    {(st==="no"||st==="maybe")&&<input disabled={locked} key={rsvp?.note||""} defaultValue={rsvp?.note||""} placeholder={st==="maybe"?"Anmerkung (optional)":"Grund (optional, z. B. krank)"}
       onBlur={e=>{const v=e.target.value.trim();if(v!==(rsvp?.note||""))onSave(ev,kid.id,st,v);}}
       style={{width:"100%",marginTop:8,padding:"8px 10px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit"}}/>}
   </div>);
 }
 
-function RsvpPage({role,events,players,rsvps,onSetRsvp,myKids,toast,onlineUsers,currentUser}) {
+function RsvpPage({role,events,players,rsvps,eventMeta={},onSetRsvp,myKids,toast,onlineUsers,currentUser}) {
   // Elternansicht "Termine": eigene Kinder zu-/absagen, andere nur ansehen
   const [showAll,setShowAll] = useState(false);
   const [openKey,setOpenKey] = useState(null);
+  const now = useNow();
   const horizon = addDaysISO(todayISO(),RSVP_HORIZON_DAYS);
   const shown = showAll ? events : events.filter(e=>e.date<=horizon);
   const hidden = events.length - shown.length;
   const save = async (ev,pid,status,note)=>{
     try{ await onSetRsvp(ev,pid,status,note); }
-    catch(e){ console.warn("rsvp",e); toast("Speichern nicht möglich – bitte Berechtigung prüfen","warn"); }
+    catch(e){ console.warn("rsvp",e); toast("Nach dem Anmeldeschluss oder ohne Berechtigung nicht möglich – bitte den Trainer fragen","warn"); }
   };
   const active = players.filter(p=>p.active!==false).sort((a,b)=>(a.name||"").localeCompare(b.name||""));
   const stOf=(ev,p)=>rsvps[rsvpKey(ev.key,p.id)]?.status||null;
@@ -5287,10 +5544,13 @@ function RsvpPage({role,events,players,rsvps,onSetRsvp,myKids,toast,onlineUsers,
       const open=myKids.filter(k=>!rsvps[rsvpKey(ev.key,k.id)]).length;
       const yesL=active.filter(p=>stOf(ev,p)==="yes"), maybeL=active.filter(p=>stOf(ev,p)==="maybe"), noL=active.filter(p=>stOf(ev,p)==="no"), openL=active.filter(p=>!stOf(ev,p));
       const isOpen=openKey===ev.key;
-      return(<div key={ev.key} style={{background:C.card,borderRadius:12,border:`1.5px solid ${open>0?"#fde047":C.border}`,padding:"12px 16px",marginBottom:10}}>
+      const dl=eventMeta?.[ev.key]?.deadlineMs||null;
+      const closed=!!dl&&now>dl;
+      return(<div key={ev.key} style={{background:C.card,borderRadius:12,border:`1.5px solid ${open>0&&!closed?"#fde047":C.border}`,padding:"12px 16px",marginBottom:10}}>
         <RsvpEventHead ev={ev}/>
+        {dl&&<div style={{marginTop:8,fontSize:12,fontWeight:700,padding:"6px 10px",borderRadius:8,background:closed?"#fee2e2":"#fef3c7",color:closed?"#b91c1c":"#92400e"}}>{closed?`🔒 Anmeldeschluss war ${fmtDeadline(dl)} – Änderungen bitte direkt beim Trainer melden`:`⏰ Zu-/Absage möglich bis ${fmtDeadline(dl)}`}</div>}
         <div style={{marginTop:6}}>
-          {myKids.map(k=><RsvpKidRow key={k.id} kid={k} ev={ev} rsvp={rsvps[rsvpKey(ev.key,k.id)]} onSave={save} showName={myKids.length>1}/>)}
+          {myKids.map(k=><RsvpKidRow key={k.id} kid={k} ev={ev} rsvp={rsvps[rsvpKey(ev.key,k.id)]} onSave={save} showName={myKids.length>1} locked={closed}/>)}
         </div>
         <div onClick={()=>setOpenKey(isOpen?null:ev.key)} style={{cursor:"pointer",display:"flex",gap:14,fontSize:13,fontWeight:800,marginTop:4,paddingTop:10,borderTop:`1px solid ${C.border}`}}>
           <span style={{color:"#16a34a"}}>✅ {yesL.length}</span>
@@ -5413,9 +5673,11 @@ function useCloudStorage(key, def, user, groupId=DEFAULT_GROUP_ID) {
   }, [user, groupId, key, localKey]); // eslint-disable-line
 
   const save = useCallback((nextOrFn) => {
+    let logged = false; // Updater kann doppelt laufen (StrictMode) – Log nur einmal schreiben
     setStore(st => {
       const base = st.k===localKey ? st : {k:localKey, data:def, ready:false, fromCloud:false};
       const next = typeof nextOrFn === 'function' ? nextOrFn(base.data) : nextOrFn;
+      if(!logged && user && groupId && LOG_CFG[key] && (base.ready||base.fromCloud)){ logged=true; try{ logDiff(groupId,user,key,base.data,next); }catch(e){ console.warn("logDiff",e); } }
       // Write locally
       db.kv.put({ key: localKey, value: JSON.stringify(next) }).catch(() => {});
       // Write to cloud if logged in
@@ -5768,14 +6030,21 @@ export default function App() {
   // Effektive Rolle für Tab-/Aktions-Berechtigungen: globaler Admin ist überall admin,
   // sonst zählt die Rolle innerhalb der aktuell aktiven Gruppe.
   // Maßgeblich ist die Rolle im aktuellen Team (ein Nutzer kann in Team 1 Trainer, in Team 2 Elternteil, in Team 3 Spieler sein)
-  const realRole = currentMembership?.role || (isGlobalAdmin ? "admin" : null);
-  const isCoachReal = realRole==="admin" || realRole==="trainer"; // echte Rechte, unabhängig von der gewählten Ansicht
-  // Eigenes Mitgliedsdokument (u.a. verknüpfte Kinder) + wählbare Ansichten
+  // Eigenes Mitgliedsdokument (live): Rollen (mehrere möglich) und verknüpfte Kinder
   const myMember = useMyMember(currentGroupId, user);
+  const memberSrc = myMember || currentMembership;
+  const myRoles = memberSrc ? memberRoles(memberSrc) : (isGlobalAdmin ? ["admin"] : []);
+  const realRole = memberSrc ? primaryRole(myRoles) : (isGlobalAdmin ? "admin" : null);
+  const isCoachReal = realRole==="admin" || realRole==="trainer"; // echte Rechte, unabhängig von der gewählten Ansicht
   const [viewRoleRaw,setViewRoleRaw]=useState(null);
   useEffect(()=>{ setViewRoleRaw(user?.uid&&currentGroupId?(localStorage.getItem(`viewRole_${user.uid}_${currentGroupId}`)||null):null); },[user?.uid,currentGroupId]);
   const hasChildLink = (myMember?.childIds||[]).length>0;
-  const roleViews = realRole==="admin" ? ["admin","trainer","eltern","spieler"] : (realRole==="trainer"&&hasChildLink) ? ["trainer","eltern"] : [];
+  // Wählbare Ansichten = die eigenen Rollen im Team. Admins können zusätzlich alle Ansichten zur Vorschau nutzen,
+  // Trainer mit verknüpftem Kind bekommen die Elternansicht dazu.
+  let roleViews = ROLE_ORDER.filter(r=>myRoles.includes(r));
+  if(realRole==="admin") roleViews=["admin","trainer","eltern","spieler"];
+  else if(realRole==="trainer"&&hasChildLink&&!roleViews.some(isFamily)) roleViews=[...roleViews,"eltern"];
+  if(roleViews.length<2) roleViews=[];
   // Effektive Rolle = gewählte Ansicht (nur wenn erlaubt), sonst die echte Rolle
   const role = roleViews.includes(viewRoleRaw) ? viewRoleRaw : realRole;
   const setViewRole = v => { setViewRoleRaw(v); if(user?.uid&&currentGroupId) localStorage.setItem(`viewRole_${user.uid}_${currentGroupId}`,v); };
@@ -5799,7 +6068,7 @@ export default function App() {
       // trainer and eltern have access to simplified settings
       const hasAccess=can(role,page)||(page==="settings"&&(role==="trainer"||isFamily(role)));
       if(!hasAccess){
-        const allowed=["start","calendar","library","team","teamplaner","turnier","kasse","orga","settings"].find(pg=>can(role,pg)||(pg==="settings"&&(role==="trainer"||isFamily(role))));
+        const allowed=["start","calendar","library","team","teamplaner","turnier","kasse","orga","log","settings"].find(pg=>can(role,pg)||(pg==="settings"&&(role==="trainer"||isFamily(role))));
         if(allowed) setPage(allowed);
       }
     }
@@ -5814,6 +6083,27 @@ export default function App() {
   const [meetings,   setMeetings,   mr]=useCloudStorage("meetings",   [], user, currentGroupId);
   const [recurringSlots,setRecurringSlots,rsr]=useCloudStorage("recurringSlots",[], user, currentGroupId);
   const {rsvps,setRsvp}=useRsvps(currentGroupId,user);
+  const {meta:eventMeta,setDeadline,loaded:metaLoaded}=useEventMeta(currentGroupId,user);
+  const activity=useActivityLog(currentGroupId,user,role);
+  // Rollierender Anmeldeschluss: Für jeden kommenden Serientermin (nächste 90 Tage) wird die Frist aus der Regel der Serie abgeleitet.
+  // Von Hand gesetzte Fristen eines einzelnen Termins ("manual") bleiben unangetastet.
+  useEffect(()=>{
+    if(!isCoachReal||!user||!currentGroupId||!metaLoaded||!sr||!rsr) return;
+    const today=todayISO(), horizon=addDaysISO(today,90);
+    const ops=[];
+    sessions.forEach(x=>{
+      if(!x.seriesId||x.isDraft||x.date<today||x.date>horizon) return;
+      const slot=recurringSlots.find(sl=>sl.id===x.seriesId);
+      const preset=DEADLINE_PRESETS.find(p=>p.k===slot?.rsvpRule);
+      const ev={key:"tr-"+x.id,type:"training",date:x.date,time:x.time||""};
+      const cur=eventMeta[ev.key];
+      if(cur?.manual) return;
+      const want=preset&&(!preset.needsTime||ev.time)?preset.calc(ev):null;
+      if(want!=null&&(!cur||cur.deadlineMs!==want)) ops.push(()=>setDeadline(ev,want,{auto:true,silent:true}));
+      else if(want==null&&cur?.auto) ops.push(()=>setDeadline(ev,null,{silent:true}));
+    });
+    if(ops.length) Promise.all(ops.map(f=>f())).catch(e=>console.warn("deadline sync",e));
+  },[sessions,recurringSlots,eventMeta,metaLoaded,isCoachReal,currentGroupId,user?.uid,sr,rsr]); // eslint-disable-line
   // Reduzierte, für Eltern lesbare Daten: nur Name/aktiv der Spieler und die Termine.
   // Alles Sensible (Stärken, Notizen, Kontakte, Kasse …) bleibt in den Trainer-Dokumenten.
   const [playersPub]=useCloudStorage("playersPublic",[], user, currentGroupId);
@@ -5893,7 +6183,7 @@ export default function App() {
   const rsvpEvents=isCoachReal?buildRsvpEvents(sessions,tournaments):(eventsPub||[]).filter(e=>e.date>=todayISO());
   const myKids=(myMember?.childIds||[]).map(id=>rsvpPlayers.find(p=>p.id===id)).filter(p=>p&&p.active!==false);
   const rsvpHorizon=addDaysISO(todayISO(),RSVP_HORIZON_DAYS);
-  const openRsvps=rsvpEvents.filter(ev=>ev.date<=rsvpHorizon).reduce((n,ev)=>n+myKids.filter(k=>!rsvps[rsvpKey(ev.key,k.id)]).length,0);
+  const openRsvps=rsvpEvents.filter(ev=>ev.date<=rsvpHorizon&&!(eventMeta[ev.key]?.deadlineMs&&Date.now()>eventMeta[ev.key].deadlineMs)).reduce((n,ev)=>n+myKids.filter(k=>!rsvps[rsvpKey(ev.key,k.id)]).length,0);
 
   const saveEx=x=>{ setExercises(upsert(x));logActivity(user,"exercise_saved",x.title||"");toast('Übung gespeichert'); };
   const savePl=x=>{ setPlayers(upsert(x));logActivity(user,"player_saved",x.name||"");toast('Spieler gespeichert'); };
@@ -5947,7 +6237,7 @@ export default function App() {
   // In keiner Gruppe? → Onboarding (Team anlegen oder beitreten). Jeder eingeloggte Nutzer landet hier,
   // niemand wird mehr global blockiert.
   if(memberships.length===0||!currentGroupId) return <GroupOnboarding user={user} onLogout={logout} toast={toast}/>;
-  return(<RoleSwitchCtx.Provider value={{views:roleViews,viewRole:role,realRole,setViewRole,teams:(memberships||[]).map(m=>({id:m.groupId,name:allGroups.find(g=>g.id===m.groupId)?.name||m.groupId,role:m.role})),currentTeamId:currentGroupId,switchTeam:switchGroup,manageTeams:()=>setPage("settings")}}><div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:C.bg,minHeight:"100vh"}}>
+  return(<RoleSwitchCtx.Provider value={{views:roleViews,viewRole:role,realRole,setViewRole,teams:(memberships||[]).map(m=>({id:m.groupId,name:allGroups.find(g=>g.id===m.groupId)?.name||m.groupId,role:m.role,roles:memberRoles(m)})),currentTeamId:currentGroupId,switchTeam:switchGroup,manageTeams:()=>setPage("settings")}}><div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:C.bg,minHeight:"100vh"}}>
     <style>{`*{box-sizing:border-box}body{margin:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}`}</style>
     <Toasts/>
     <Nav page={page} setPage={setPage} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0,openRsvps}}/>
@@ -5959,8 +6249,9 @@ export default function App() {
       {page==="orga"&&can(role,"orga")&&<OrgaPage todos={todos} onSaveTodo={saveTodo} onDeleteTodo={id=>{const i=todos.find(t=>t.id===id);setTodos(prev=>prev.filter(t=>t.id!==id));showUndo("Task",i,()=>setTodos(prev=>[i,...prev]));}} coaches={coaches} currentUser={user} toast={toast} showUndo={showUndo} readOnly={!can(role,"editAnything")} onlineUsers={onlineUsers} pendingTarget={pendingOrgaTarget} onClearPendingTarget={()=>setPendingOrgaTarget(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="teamplaner"&&<TeamplanerPage players={players} teamsets={teamsets} onSaveTeamset={can(role,"editAnything")?saveTSets:null} onDeleteTeamset={can(role,"editAnything")?id=>{const i=teamsets.find(t=>t.id===id);setTeamsets(prev=>prev.filter(t=>t.id!==id));showUndo("Team-Aufstellung",i,()=>setTeamsets(prev=>[i,...prev]));}:null} readOnly={!can(role,"editAnything")} showStrength={can(role,"seeStrength")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="turnier"  &&<TurnierPage  tournaments={tournaments} onSaveTournament={saveTo} onDeleteTournament={id=>{const i=tournaments.find(t=>t.id===id);setTournaments(prev=>prev.filter(t=>t.id!==id));showUndo("Turnier",i,()=>setTournaments(prev=>[i,...prev]));}} coaches={coaches} players={players} onSavePlayer={can(role,"editAnything")?savePl:null} onlineUsers={onlineUsers} currentUser={user} toast={toast} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} initialOpenId={pendingTurnierId} onClearInitialOpen={()=>setPendingTurnierId(null)}/>}
-      {page==="calendar"&&isFamily(role)&&<RsvpPage role={role} events={rsvpEvents} players={rsvpPlayers} rsvps={rsvps} onSetRsvp={setRsvp} myKids={myKids} toast={toast} onlineUsers={onlineUsers} currentUser={user}/>}
-      {page==="calendar"&&!isFamily(role)&&<CalendarPage rsvps={rsvps} onSetRsvp={setRsvp} pendingSetup={pendingSetup} onClearPendingSetup={()=>setPendingSetup(null)} onOpenTurnierPage={()=>setPage("turnier")} recurringSlots={recurringSlots} onSaveSlot={saveSlot} onDeleteSlot={id=>{const i=recurringSlots.find(s=>s.id===id);setRecurringSlots(prev=>prev.filter(s=>s.id!==id));showUndo("Serientermin",i,()=>setRecurringSlots(prev=>[i,...prev]));}} onGenerateSessions={generateSessions} sessions={sessions} meetings={meetings} tournaments={tournaments} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} onSaveMeeting={saveMeeting} onDeleteMeeting={id=>{const i=meetings.find(m=>m.id===id);setMeetings(prev=>prev.filter(m=>m.id!==id));showUndo("Trainertreff",i,()=>setMeetings(prev=>[i,...prev]));}} onSaveTournament={saveTo} onSaveExercise={saveEx} apiKey={apiKey} toast={toast} readOnly={!can(role,"editAnything")} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} pendingTarget={pendingCalendarTarget} onClearPendingTarget={()=>setPendingCalendarTarget(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="calendar"&&isFamily(role)&&<RsvpPage role={role} events={rsvpEvents} players={rsvpPlayers} rsvps={rsvps} eventMeta={eventMeta} onSetRsvp={setRsvp} myKids={myKids} toast={toast} onlineUsers={onlineUsers} currentUser={user}/>}
+      {page==="calendar"&&!isFamily(role)&&<CalendarPage rsvps={rsvps} eventMeta={eventMeta} onSetDeadline={setDeadline} onSetRsvp={setRsvp} pendingSetup={pendingSetup} onClearPendingSetup={()=>setPendingSetup(null)} onOpenTurnierPage={()=>setPage("turnier")} recurringSlots={recurringSlots} onSaveSlot={saveSlot} onDeleteSlot={id=>{const i=recurringSlots.find(s=>s.id===id);setRecurringSlots(prev=>prev.filter(s=>s.id!==id));showUndo("Serientermin",i,()=>setRecurringSlots(prev=>[i,...prev]));}} onGenerateSessions={generateSessions} sessions={sessions} meetings={meetings} tournaments={tournaments} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} onSaveMeeting={saveMeeting} onDeleteMeeting={id=>{const i=meetings.find(m=>m.id===id);setMeetings(prev=>prev.filter(m=>m.id!==id));showUndo("Trainertreff",i,()=>setMeetings(prev=>[i,...prev]));}} onSaveTournament={saveTo} onSaveExercise={saveEx} apiKey={apiKey} toast={toast} readOnly={!can(role,"editAnything")} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} pendingTarget={pendingCalendarTarget} onClearPendingTarget={()=>setPendingCalendarTarget(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="log"&&can(role,"log")&&<ActivityPage entries={activity} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="kasse"    &&can(role,"kasse")&&<KassePage kassenbuch={kassenbuch} onSave={can(role,"editKasse")?saveKa:null} onDelete={can(role,"editKasse")?id=>{const i=kassenbuch.find(k=>k.id===id);setKassenbuch(prev=>prev.filter(k=>k.id!==id));showUndo("Eintrag",i,()=>setKassenbuch(prev=>[i,...prev]));}:null} readOnly={!can(role,"editKasse")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="settings"&&isFamily(role)&&<ParentSettingsPage role={role} memberships={memberships} onSwitchGroup={switchGroup} firebaseUser={user} groupId={currentGroupId} myKids={myKids} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onLogout={logout} toast={toast} onlineUsers={onlineUsers}/>}
       {(can(role,"settings")||role==="trainer")&&page==="settings"&&<SettingsPage key={role} onCreatePlayer={createPlayerProfile} exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={switchGroup} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
