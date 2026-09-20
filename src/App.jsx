@@ -814,7 +814,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.45.0";
+const APP_VERSION = "3.46.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -1611,6 +1611,7 @@ ${PDF_SCRIPT}</body></html>`;
           <Btn onClick={()=>importRef.current.click()} variant="secondary" sm><Upload size={14}/> Import</Btn>
           <input ref={importRef} type="file" accept=".json" onChange={handleImportJson} style={{display:"none"}}/>
           <Btn onClick={()=>setModal({type:"ai"})} variant="ai" sm><Bot size={14}/> KI</Btn>
+          <Btn onClick={()=>setModal({type:"voice"})} variant="ai" sm>🎙 Einsprechen</Btn>
           <Btn onClick={()=>setModal({type:"form",ex:null})}><Plus size={16}/> Neu</Btn></>}
       <div style={{display:"flex",border:`1.5px solid ${C.border}`,borderRadius:8,overflow:"hidden"}}>
         {[["grid","⊞"],["compact","☰"]].map(([m,icon])=>(
@@ -1719,6 +1720,7 @@ ${PDF_SCRIPT}</body></html>`;
       })}
     </div>}
     {modal?.type==="ai"&&<Modal title="🤖 KI-Import" onClose={()=>setModal(null)} wide><AIImportModal apiKey={apiKey} onSave={ex=>{onSave(ex);setModal(null);}} onClose={()=>setModal(null)}/></Modal>}
+    {modal?.type==="voice"&&<Modal title="🎙 Übung einsprechen" onClose={()=>setModal(null)} wide><VoiceExerciseModal onSave={ex=>{onSave(ex);setModal(null);}} onClose={()=>setModal(null)}/></Modal>}
     {modal?.type==="form"&&<Modal title={modal.ex?"Übung bearbeiten":"Neue Übung"} onClose={()=>setModal(null)} wide><ExerciseForm exercise={modal.ex} onSave={(ex,andAdd)=>{onSave(ex);if(!andAdd)setModal(null);}} onClose={()=>setModal(null)}/></Modal>}
     {modal?.type==="detail"&&<Modal title={modal.ex.title} onClose={()=>setModal(null)} wide><ExDetail exercise={modal.ex} onEdit={()=>setModal({type:"form",ex:modal.ex})} onSave={ex=>{onSave({...ex,updatedAt:now()});setModal(m=>m?{...m,ex}:m);}} onDelete={onDelete} onClose={()=>setModal(null)}/></Modal>}
   </div>);
@@ -2330,6 +2332,7 @@ function SessionDetailView({s,players,coaches,exercises,rsvps,onDelete,onClose,o
       {s.location&&<span><MapLink place={s.location}/></span>}
       {s.weather&&<span>🌤 {s.weather}</span>}
     </div>}
+    <ProtocolSection kind="training" item={s} onSave={onSaveSession}/>
     {/* Trainer */}
     {tr.length>0&&<div style={{marginBottom:14}}>
       <div style={{fontSize:11,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Trainer</div>
@@ -3116,6 +3119,7 @@ function MeetingCard({m,onEdit,onDel,onSave,readOnly,initialOpen}) {
         </div>
       </div>)}
       {!readOnly&&<Btn variant="secondary" onClick={e=>{e.stopPropagation();setShowAdd(true);}} style={{marginTop:10,width:"100%",justifyContent:"center"}}><Plus size={14}/> Neuer Punkt</Btn>}
+      <ProtocolSection kind="meeting" item={m} onSave={readOnly?null:onSave} readOnly={readOnly}/>
       {(m.createdByName||m.createdBy)&&<div style={{fontSize:11,color:C.muted,marginTop:8}}>Erstellt von {m.createdByName||m.createdBy}</div>}
     </div>}
     {showAdd&&<Modal title="Neuer Agendapunkt" onClose={()=>setShowAdd(false)}>
@@ -4240,6 +4244,7 @@ function TournamentDetail({tournament:t,onUpdate,onBack,coaches=[],toast,players
       <Btn sm variant="secondary" onClick={()=>setEditModal(true)}><Edit2 size={13}/> Bearbeiten</Btn>
     </div>
     {editModal&&<Modal title="Turnier bearbeiten" onClose={()=>setEditModal(false)} wide><TournamentEditWizard tournament={t} players={players} onSavePlayer={onSavePlayer} onSave={upd=>{onUpdate({...t,...upd});setEditModal(false);toast?.("Turnier gespeichert");}} onClose={()=>setEditModal(false)}/></Modal>}
+    <ProtocolSection kind="turnier" item={t} onSave={onUpdate}/>
     {t.hosting==="other"?(
       <div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"16px 18px"}}>
         <div style={{fontSize:13,color:C.muted,marginBottom:12}}>🤝 Dieses Turnier wird von einem anderen Verein ausgerichtet.</div>
@@ -5111,6 +5116,513 @@ function NamePrompt({user,groupId,toast,onSkip}) {
       <Btn onClick={save} disabled={busy||!n.trim()}>{busy?"…":"Speichern"}</Btn>
     </div>
   </Modal>);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// KI-FUNKTIONEN: Protokoll einlesen · Übung einsprechen (mit Skizze)
+// ═══════════════════════════════════════════════════════════════════
+const AI_MODEL = "claude-sonnet-5";
+// Kontext für alle KI-Bausteine: API-Key, vorhandene Aufgaben, Trainer, Nutzer, Aufgaben anlegen, Toast
+const AiCtx = React.createContext({apiKey:"",todos:[],coaches:[],user:null,addTodos:null,toast:()=>{}});
+
+async function aiComplete({system,messages,apiKey,maxTokens=4000}) {
+  if(!apiKey) throw new Error("Für die KI-Funktionen fehlt der API-Key (Einstellungen → KI API-Key).");
+  const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true","x-api-key":apiKey},body:JSON.stringify({model:AI_MODEL,max_tokens:maxTokens,system,messages})});
+  if(!res.ok){
+    let msg=`Fehler ${res.status}`; try{ const e=await res.json(); msg=e.error?.message||msg; }catch(_){}
+    throw new Error(res.status===401?"Der API-Key ist ungültig oder abgelaufen.":msg);
+  }
+  const data=await res.json();
+  return (data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
+}
+function extractJson(t) {
+  if(!t) return null;
+  const c=String(t).replace(/```json\s*/gi,"").replace(/```/g,"").trim();
+  try{ return JSON.parse(c); }catch(_){}
+  const a=c.indexOf("{"), b=c.lastIndexOf("}");
+  if(a>=0&&b>a){ try{ return JSON.parse(c.slice(a,b+1)); }catch(_){} }
+  return null;
+}
+
+// ── Spracheingabe (Web Speech API; sonst Diktierfunktion der Tastatur) ──
+function useSpeechInput(onFinal,lang="de-DE") {
+  const SR=typeof window!=="undefined"&&(window.SpeechRecognition||window.webkitSpeechRecognition);
+  const [listening,setListening]=useState(false);
+  const [interim,setInterim]=useState("");
+  const [err,setErr]=useState("");
+  const recRef=useRef(null); const cb=useRef(onFinal); cb.current=onFinal;
+  const start=()=>{
+    if(!SR) return;
+    try{
+      const r=new SR(); r.lang=lang; r.continuous=true; r.interimResults=true;
+      r.onresult=e=>{ let fin="",int=""; for(let i=e.resultIndex;i<e.results.length;i++){ const t=e.results[i][0].transcript; if(e.results[i].isFinal) fin+=t; else int+=t; } if(fin) cb.current(fin); setInterim(int); };
+      r.onerror=e=>{ setErr(e.error==="not-allowed"||e.error==="service-not-allowed"?"Mikrofon nicht erlaubt – bitte in den Browser-Einstellungen freigeben.":e.error==="no-speech"?"":`Spracherkennung: ${e.error}`); setListening(false); };
+      r.onend=()=>{ setListening(false); setInterim(""); };
+      recRef.current=r; r.start(); setListening(true); setErr("");
+    }catch(e){ setErr("Spracherkennung konnte nicht gestartet werden."); }
+  };
+  const stop=()=>{ try{ recRef.current?.stop(); }catch(_){} };
+  useEffect(()=>()=>{ try{ recRef.current?.abort(); }catch(_){} },[]);
+  return {supported:!!SR,listening,interim,err,start,stop};
+}
+// Textfeld mit Mikrofon-Taste
+function DictationField({label,value,onChange,placeholder,rows=6}) {
+  const ref=useRef(value); ref.current=value;
+  const sp=useSpeechInput(t=>{ const cur=ref.current||""; onChange((cur+(cur&&!/\s$/.test(cur)?" ":"")+t.trim()).trim()); });
+  return(<div style={{marginBottom:12}}>
+    {label&&<label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:5,textTransform:"uppercase",letterSpacing:.6}}>{label}</label>}
+    <textarea value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} rows={rows}
+      style={{width:"100%",padding:"9px 12px",border:`1.5px solid ${sp.listening?"#dc2626":C.border}`,borderRadius:8,fontSize:14,color:C.text,background:"white",outline:"none",boxSizing:"border-box",fontFamily:"inherit",resize:"vertical"}}/>
+    {sp.interim&&<div style={{fontSize:13,color:C.muted,fontStyle:"italic",margin:"4px 2px"}}>{sp.interim}</div>}
+    <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginTop:6}}>
+      {sp.supported
+        ?<button type="button" onClick={sp.listening?sp.stop:sp.start} style={{padding:"7px 14px",borderRadius:20,border:`1.5px solid ${sp.listening?"#dc2626":C.border}`,background:sp.listening?"#fee2e2":C.card,color:sp.listening?"#b91c1c":C.text,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>{sp.listening?"⏹ Aufnahme beenden":"🎙 Einsprechen"}</button>
+        :<span style={{fontSize:12,color:C.muted}}>🎙 Tipp: Mit der Mikrofon-Taste deiner Tastatur kannst du hier diktieren.</span>}
+      {sp.err&&<span style={{fontSize:12,color:"#b91c1c"}}>{sp.err}</span>}
+    </div>
+  </div>);
+}
+
+// ── Dateien einlesen: Text, Word (.docx), OpenDocument (.odt), RTF, HTML, PDF, Fotos ──
+async function unzipEntry(buf,wanted) {
+  const dv=new DataView(buf), u8=new Uint8Array(buf);
+  let eocd=-1;
+  for(let i=u8.length-22;i>=Math.max(0,u8.length-65557);i--){ if(dv.getUint32(i,true)===0x06054b50){ eocd=i; break; } }
+  if(eocd<0) throw new Error("Keine gültige Office-Datei.");
+  const total=dv.getUint16(eocd+10,true); let off=dv.getUint32(eocd+16,true);
+  for(let n=0;n<total;n++){
+    if(dv.getUint32(off,true)!==0x02014b50) break;
+    const method=dv.getUint16(off+10,true), csize=dv.getUint32(off+20,true);
+    const nameLen=dv.getUint16(off+28,true), extraLen=dv.getUint16(off+30,true), cmtLen=dv.getUint16(off+32,true), lho=dv.getUint32(off+42,true);
+    const name=new TextDecoder().decode(u8.subarray(off+46,off+46+nameLen));
+    if(name===wanted){
+      const start=lho+30+dv.getUint16(lho+26,true)+dv.getUint16(lho+28,true);
+      const data=u8.subarray(start,start+csize);
+      if(method===0) return data;
+      if(method===8){ const stream=new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw")); return new Uint8Array(await new Response(stream).arrayBuffer()); }
+      throw new Error("Komprimierung der Datei wird nicht unterstützt.");
+    }
+    off+=46+nameLen+extraLen+cmtLen;
+  }
+  return null;
+}
+const xmlDecode = t => t.replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&#x([0-9a-f]+);/gi,(_,h)=>String.fromCodePoint(parseInt(h,16))).replace(/&#(\d+);/g,(_,d)=>String.fromCodePoint(Number(d))).replace(/&amp;/g,"&");
+async function docxText(f) {
+  const u=await unzipEntry(await f.arrayBuffer(),"word/document.xml");
+  if(!u) throw new Error("Die Word-Datei enthält keinen lesbaren Text.");
+  const xml=new TextDecoder("utf-8").decode(u);
+  return xmlDecode(xml.replace(/<w:tab\/>/g,"\t").replace(/<w:br[^>]*\/>/g,"\n").replace(/<\/w:tc>/g,"\t").replace(/<\/w:p>/g,"\n").replace(/<[^>]+>/g,"")).replace(/\n{3,}/g,"\n\n").trim();
+}
+async function odtText(f) {
+  const u=await unzipEntry(await f.arrayBuffer(),"content.xml");
+  if(!u) throw new Error("Die ODT-Datei enthält keinen lesbaren Text.");
+  const xml=new TextDecoder("utf-8").decode(u);
+  return xmlDecode(xml.replace(/<text:tab\/>/g,"\t").replace(/<text:line-break\/>/g,"\n").replace(/<text:s[^>]*\/>/g," ").replace(/<\/text:(p|h)>/g,"\n").replace(/<[^>]+>/g,"")).replace(/\n{3,}/g,"\n\n").trim();
+}
+const rtfToText = r => r.replace(/\{\\(?:fonttbl|colortbl|stylesheet|info|\*)[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g,"").replace(/\\'([0-9a-f]{2})/gi,(_,h)=>String.fromCharCode(parseInt(h,16))).replace(/\\u(-?\d+)\??/g,(_,n)=>String.fromCharCode(Number(n)<0?Number(n)+65536:Number(n))).replace(/\\par[d]?/g,"\n").replace(/\\tab/g,"\t").replace(/\\[a-z]+-?\d* ?/gi,"").replace(/[{}]/g,"").replace(/\n{3,}/g,"\n\n").trim();
+const htmlToText = h => { const d=new DOMParser().parseFromString(String(h).replace(/<br\s*\/?>|<\/(?:p|div|h[1-6]|li|tr|section|article)>/gi,m=>m+"\n"),"text/html"); d.querySelectorAll("script,style").forEach(x=>x.remove()); return (d.body?.textContent||"").replace(/\n{3,}/g,"\n\n").trim(); };
+async function imageToBase64(file,maxDim=1800) {
+  const url=URL.createObjectURL(file);
+  try{
+    const img=await new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=()=>rej(new Error("Das Bild konnte nicht gelesen werden.")); i.src=url; });
+    const sc=Math.min(1,maxDim/Math.max(img.width,img.height));
+    const c=document.createElement("canvas"); c.width=Math.max(1,Math.round(img.width*sc)); c.height=Math.max(1,Math.round(img.height*sc));
+    const g=c.getContext("2d"); g.fillStyle="#fff"; g.fillRect(0,0,c.width,c.height); g.drawImage(img,0,0,c.width,c.height);
+    return c.toDataURL("image/jpeg",0.85).split(",")[1];
+  } finally { URL.revokeObjectURL(url); }
+}
+async function fileToAttachment(f) {
+  const name=f.name||"Datei", low=name.toLowerCase(), type=f.type||"";
+  if(/\.docx$/.test(low)) return {name,kind:"text",text:await docxText(f)};
+  if(/\.odt$/.test(low)) return {name,kind:"text",text:await odtText(f)};
+  if(/\.rtf$/.test(low)) return {name,kind:"text",text:rtfToText(await readText(f))};
+  if(/\.html?$/.test(low)) return {name,kind:"text",text:htmlToText(await readText(f))};
+  if(/\.pdf$/.test(low)||type==="application/pdf"){
+    if(f.size>20*1024*1024) throw new Error(`„${name}" ist größer als 20 MB.`);
+    return {name,kind:"pdf",b64:(await readDataURL(f)).split(",")[1]};
+  }
+  if(/^image\//.test(type)||/\.(png|jpe?g|webp|gif)$/.test(low)) return {name,kind:"image",b64:await imageToBase64(f),mediaType:"image/jpeg"};
+  if(/\.(txt|md|markdown|csv|log)$/.test(low)||type.startsWith("text/")) return {name,kind:"text",text:await readText(f)};
+  if(/\.doc$/.test(low)) throw new Error("Das alte Word-Format (.doc) wird nicht unterstützt – bitte als .docx oder PDF speichern.");
+  throw new Error(`Dateityp von „${name}" wird nicht unterstützt (erlaubt: PDF, Word .docx, .odt, .txt/.md, .rtf, Fotos).`);
+}
+
+// ── PROTOKOLL EINLESEN ─────────────────────────────────────────────
+const normTxt = t => String(t||"").toLowerCase().replace(/[^a-zäöüß0-9 ]/g," ").split(/\s+/).filter(w=>w.length>2);
+// Ähnliche, bereits offene Aufgabe? (Wortüberschneidung)
+function similarTodo(existing,task) {
+  const a=new Set(normTxt(task)); if(a.size===0) return null;
+  for(const t of existing){
+    const b=new Set(normTxt(t.task)); if(b.size===0) continue;
+    const inter=[...a].filter(w=>b.has(w)).length;
+    if(inter/Math.min(a.size,b.size)>=0.75&&inter>=2) return t;
+  }
+  return null;
+}
+const PROTOCOL_SYS = (label,coachNames) => `Du bist Assistent eines Jugendfußball-Trainerstabs (SC Sternschanze, G-Jugend, Jahrgang 2019). Du bekommst das Protokoll oder die Notizen zu einem Termin (${label}) – als Text, Foto oder PDF. Werte es sorgfältig aus.
+
+Aufgaben:
+1. "summary": Zusammenfassung in 3–6 Sätzen (was wurde besprochen/entschieden/erlebt).
+2. "points": gegliederte Themenpunkte in der Reihenfolge des Protokolls. Je Punkt: "topic" (kurze Überschrift), "details" (Liste knapper Stichpunkte), "decision" (Beschluss/Ergebnis, sonst leerer Text).
+3. "todos": nur echte Handlungsaufträge (jemand soll etwas tun, besorgen, klären, organisieren). Keine reinen Informationen oder Beschlüsse. Je To-Do: "task" (kurz, konkret, im Infinitiv/Imperativ, ohne Namen), "owner" (Name der zuständigen Person, wenn genannt; sonst null), "due" (Datum YYYY-MM-DD, wenn ein Termin genannt oder eindeutig ableitbar ist – z. B. "bis nächsten Freitag" oder "vor dem Turnier" relativ zum Termindatum/Heute; sonst null), "note" (nötiger Kontext, sonst leerer Text), "priority" ("hoch" bei ausdrücklicher Dringlichkeit, sonst "normal"). Keine Duplikate, nichts erfinden.
+4. "openQuestions": ungeklärte Fragen, die im Protokoll offen blieben (sonst leere Liste).
+Bekannte Trainer: ${coachNames.length?coachNames.join(", "):"(keine hinterlegt)"} – schreibe "owner" möglichst genau so, wenn die Person gemeint ist.
+Bei unleserlichen Stellen: nicht raten, sondern weglassen oder in openQuestions vermerken.
+Antworte NUR mit JSON ohne Codeblock: {"summary":"","points":[{"topic":"","details":[],"decision":""}],"todos":[{"task":"","owner":null,"due":null,"note":"","priority":"normal"}],"openQuestions":[]}`;
+
+function ProtocolImportModal({kind,item,onSave,onClose}) {
+  const ctx=React.useContext(AiCtx);
+  const label=kind==="meeting"?"Trainertreff":kind==="turnier"?"Turnier":"Training";
+  const title=item.title||item.name||"";
+  const [text,setText]=useState("");
+  const [files,setFiles]=useState([]);
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState("");
+  const [res,setRes]=useState(null);   // {summary,points,openQuestions}
+  const [todos,setTodos]=useState([]); // [{task,owner,due,note,priority,sel,dup}]
+  const fileRef=useRef();
+  const mapOwner=o=>{ if(!o) return ""; const low=String(o).toLowerCase(); const c=(ctx.coaches||[]).find(c=>c.name&&(c.name.toLowerCase()===low||c.name.toLowerCase().split(" ")[0]===low.split(" ")[0])); return c?c.name:String(o); };
+  const addFiles=async e=>{
+    const list=[...(e.target.files||[])]; e.target.value=""; setErr("");
+    for(const f of list){
+      if(files.length>=6){ setErr("Höchstens 6 Dateien auf einmal."); break; }
+      try{ const a=await fileToAttachment(f); setFiles(prev=>[...prev,a]); }
+      catch(er){ setErr(er.message); }
+    }
+  };
+  const analyse=async()=>{
+    setBusy(true); setErr("");
+    try{
+      const textParts=[text.trim(),...files.filter(f=>f.kind==="text").map(f=>`--- ${f.name} ---\n${f.text}`)].filter(Boolean).join("\n\n");
+      if(!textParts&&!files.length) throw new Error("Bitte Text einfügen oder eine Datei auswählen.");
+      const intro=`Termin: ${label}${title?` „${title}"`:""}\nDatum: ${item.date||"unbekannt"}\nHeute: ${todayISO()}\n\n`;
+      const content=[{type:"text",text:intro+(textParts?`Protokolltext:\n${textParts.slice(0,150000)}`:"Das Protokoll liegt als Anhang (Foto/PDF) vor.")}];
+      files.filter(f=>f.kind==="pdf").forEach(f=>content.push({type:"document",source:{type:"base64",media_type:"application/pdf",data:f.b64}}));
+      files.filter(f=>f.kind==="image").forEach(f=>content.push({type:"image",source:{type:"base64",media_type:f.mediaType,data:f.b64}}));
+      const out=await aiComplete({system:PROTOCOL_SYS(label,(ctx.coaches||[]).map(c=>c.name).filter(Boolean)),messages:[{role:"user",content}],apiKey:ctx.apiKey,maxTokens:4000});
+      const d=extractJson(out);
+      if(!d||(!d.summary&&!Array.isArray(d.points))) throw new Error("Die KI-Antwort war nicht auswertbar – bitte erneut versuchen.");
+      const existing=(ctx.todos||[]).filter(t=>!t.done);
+      const list=(Array.isArray(d.todos)?d.todos:[]).map(t=>({task:String(t.task||"").trim(),owner:mapOwner(t.owner),due:/^\d{4}-\d{2}-\d{2}$/.test(t.due||"")?t.due:"",note:String(t.note||"").trim(),priority:t.priority==="hoch"?"hoch":"normal"})).filter(t=>t.task)
+        .map(t=>{ const dup=!!similarTodo(existing,t.task); return {...t,dup,sel:!dup}; });
+      setTodos(list);
+      setRes({summary:String(d.summary||"").trim(),points:(Array.isArray(d.points)?d.points:[]).map(p=>({topic:String(p.topic||"").trim(),details:(Array.isArray(p.details)?p.details:[]).map(x=>String(x).trim()).filter(Boolean),decision:String(p.decision||"").trim()})).filter(p=>p.topic||p.details.length),openQuestions:(Array.isArray(d.openQuestions)?d.openQuestions:[]).map(x=>String(x).trim()).filter(Boolean)});
+    }catch(e){ setErr(e.message); }
+    setBusy(false);
+  };
+  const setTodo=(i,patch)=>setTodos(l=>l.map((t,j)=>j===i?{...t,...patch}:t));
+  const chosen=todos.filter(t=>t.sel&&t.task.trim());
+  const finish=withTodos=>{
+    const sources=[...files.map(f=>f.name),...(text.trim()?["Text"]:[])];
+    const protocol={summary:res.summary,points:res.points,openQuestions:res.openQuestions,sources,createdAt:now(),createdByName:ctx.user?.displayName||ctx.user?.email||"",todoCount:withTodos?chosen.length:0};
+    if(withTodos&&chosen.length&&ctx.addTodos){
+      ctx.addTodos(chosen.map(t=>({id:uid(),task:t.task.trim(),owner:t.owner.trim()||null,due:t.due||null,done:false,doneAt:null,createdAt:now(),createdBy:ctx.user?.uid||null,createdByName:ctx.user?.displayName||ctx.user?.email||null,updatedAt:now(),source:`${label}${item.date?" "+fmtDate(item.date):""}`,...(t.note?{note:t.note}:{})})));
+    }
+    onSave({...item,protocol});
+    ctx.toast(withTodos&&chosen.length?`Protokoll gespeichert · ${chosen.length} Aufgabe${chosen.length!==1?"n":""} übernommen ✓`:"Protokoll gespeichert ✓");
+    onClose();
+  };
+  const small={padding:"6px 10px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,color:C.text,background:"white",fontFamily:"inherit",outline:"none",boxSizing:"border-box"};
+  if(!ctx.apiKey) return(<div><div style={{background:"#fffbeb",border:"1px solid #fde68a",borderRadius:10,padding:"12px 14px",fontSize:13,color:"#92400e",marginBottom:14}}>Für die KI-Auswertung fehlt der API-Key. Trage ihn unter <b>Einstellungen → KI API-Key</b> ein.</div><div style={{textAlign:"right"}}><Btn variant="secondary" onClick={onClose}>Schließen</Btn></div></div>);
+  if(!res) return(<div>
+    <div style={{background:"#faf5ff",borderRadius:10,padding:"12px 14px",marginBottom:14,border:"1px solid #e9d5ff",fontSize:13,color:"#6d28d9"}}>🤖 Protokoll als Datei (PDF, Word, Text, Foto) oder als Text einfügen. Die KI gliedert es, fasst es zusammen und findet die Aufgaben.</div>
+    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>
+      <Btn variant="secondary" onClick={()=>fileRef.current.click()}><Upload size={14}/> Datei / Foto wählen</Btn>
+      <input ref={fileRef} type="file" multiple accept=".pdf,.docx,.odt,.txt,.md,.rtf,.html,.htm,.csv,image/*" onChange={addFiles} style={{display:"none"}}/>
+    </div>
+    {files.length>0&&<div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
+      {files.map((f,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",borderRadius:8,background:C.bg,border:`1px solid ${C.border}`,fontSize:13}}>
+        <span>{f.kind==="pdf"?"📄":f.kind==="image"?"🖼":"📝"}</span><span style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:C.text}}>{f.name}</span>
+        {f.kind==="text"&&<span style={{fontSize:11,color:C.muted}}>{f.text.length} Zeichen</span>}
+        <button onClick={()=>setFiles(l=>l.filter((_,j)=>j!==i))} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",fontSize:16,lineHeight:1}}>✕</button>
+      </div>)}
+    </div>}
+    <DictationField label="Oder Text einfügen / diktieren" value={text} onChange={setText} rows={7} placeholder="Protokolltext hier einfügen …"/>
+    {err&&<div style={{color:"#ef4444",fontSize:13,marginBottom:12,fontWeight:600}}>❌ {err}</div>}
+    <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Btn variant="secondary" onClick={onClose}>Abbrechen</Btn>
+      <Btn variant="ai" onClick={analyse} disabled={busy||(!text.trim()&&!files.length)}>{busy?<><RefreshCw size={14} style={{animation:"spin 1s linear infinite"}}/> Werte aus …</>:<><Bot size={14}/> Auswerten</>}</Btn></div>
+  </div>);
+  return(<div>
+    <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Zusammenfassung</div>
+    <textarea value={res.summary} onChange={e=>setRes(r=>({...r,summary:e.target.value}))} rows={4} style={{...small,width:"100%",marginBottom:14,resize:"vertical"}}/>
+    {res.points.length>0&&<div style={{marginBottom:14}}>
+      <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Themen ({res.points.length})</div>
+      {res.points.map((p,i)=><div key={i} style={{padding:"9px 12px",borderRadius:10,border:`1px solid ${C.border}`,background:C.card,marginBottom:6}}>
+        <div style={{fontWeight:800,fontSize:14,color:C.text}}>{i+1}. {p.topic}</div>
+        {p.details.map((d,j)=><div key={j} style={{fontSize:13,color:C.text,marginTop:3,paddingLeft:10}}>• {d}</div>)}
+        {p.decision&&<div style={{fontSize:13,color:C.primary,fontWeight:700,marginTop:5}}>➡ {p.decision}</div>}
+      </div>)}
+    </div>}
+    {res.openQuestions.length>0&&<div style={{marginBottom:14,padding:"9px 12px",borderRadius:10,background:"#fffbeb",border:"1px solid #fde68a",fontSize:13,color:"#92400e"}}><b>Offene Fragen:</b>{res.openQuestions.map((q,i)=><div key={i}>• {q}</div>)}</div>}
+    <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Aufgaben erkannt ({todos.length})</div>
+    {todos.length===0&&<div style={{fontSize:13,color:C.muted,marginBottom:14}}>Keine Aufgaben im Protokoll gefunden.</div>}
+    {todos.map((t,i)=><div key={i} style={{padding:"9px 12px",borderRadius:10,border:`1.5px solid ${t.sel?C.primary:C.border}`,background:t.sel?C.accentL:C.card,marginBottom:8}}>
+      <div style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+        <input type="checkbox" checked={t.sel} onChange={e=>setTodo(i,{sel:e.target.checked})} style={{marginTop:6,width:18,height:18,flexShrink:0}}/>
+        <div style={{flex:1,minWidth:0}}>
+          <input value={t.task} onChange={e=>setTodo(i,{task:e.target.value})} style={{...small,width:"100%",fontWeight:700}}/>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:6,alignItems:"center"}}>
+            <input value={t.owner} onChange={e=>setTodo(i,{owner:e.target.value})} placeholder="Zuständig" style={{...small,width:140}}/>
+            <input type="date" value={t.due} onChange={e=>setTodo(i,{due:e.target.value})} style={small}/>
+            {t.priority==="hoch"&&<span style={{fontSize:11,fontWeight:800,color:"#dc2626"}}>❗ dringend</span>}
+            {t.dup&&<span style={{fontSize:11,fontWeight:700,color:"#b45309"}}>⚠ ähnliche Aufgabe existiert schon</span>}
+          </div>
+          {t.note&&<div style={{fontSize:12,color:C.muted,marginTop:5}}>{t.note}</div>}
+        </div>
+      </div>
+    </div>)}
+    <div style={{display:"flex",gap:8,justifyContent:"flex-end",flexWrap:"wrap",paddingTop:14,borderTop:`1px solid ${C.border}`,marginTop:6}}>
+      <Btn variant="secondary" onClick={()=>setRes(null)}>← Zurück</Btn>
+      <Btn variant="secondary" onClick={()=>finish(false)}>Nur Protokoll speichern</Btn>
+      <Btn onClick={()=>finish(true)} disabled={!ctx.addTodos}>{chosen.length?`Speichern + ${chosen.length} Aufgabe${chosen.length!==1?"n":""} übernehmen`:"Speichern"}</Btn>
+    </div>
+  </div>);
+}
+// Protokoll-Bereich in Termin-Details (Trainertreff, Training, Turnier)
+function ProtocolSection({kind,item,onSave,readOnly}) {
+  const [modal,setModal]=useState(false);
+  const [open,setOpen]=useState(false);
+  const p=item.protocol;
+  if(!p&&(readOnly||!onSave)) return null;
+  return(<div style={{marginTop:12,marginBottom:12,padding:"10px 14px",borderRadius:12,border:`1.5px solid ${C.border}`,background:C.card}} onClick={e=>e.stopPropagation()}>
+    <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+      <div style={{fontWeight:800,fontSize:13,color:C.text,flex:1}}>📝 Protokoll{p?.createdAt&&<span style={{fontWeight:500,color:C.muted,fontSize:11}}> · {new Date(p.createdAt).toLocaleDateString("de-DE")}{p.todoCount?` · ${p.todoCount} Aufgaben übernommen`:""}</span>}</div>
+      {p&&<button onClick={()=>setOpen(o=>!o)} style={{background:"none",border:"none",color:C.primary,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{open?"Einklappen ▲":"Anzeigen ▼"}</button>}
+      {!readOnly&&onSave&&<Btn sm variant="ai" onClick={()=>setModal(true)}><Bot size={13}/> {p?"Neu einlesen":"Protokoll einlesen"}</Btn>}
+    </div>
+    {!p&&<div style={{fontSize:12,color:C.muted,marginTop:6}}>Noch kein Protokoll. Lade eine Datei oder ein Foto hoch – die KI gliedert, fasst zusammen und findet die Aufgaben.</div>}
+    {p&&<div style={{fontSize:13,color:C.text,marginTop:8,lineHeight:1.5}}>{p.summary}</div>}
+    {p&&open&&<div style={{marginTop:10}}>
+      {(p.points||[]).map((pt,i)=><div key={i} style={{marginBottom:8}}>
+        <div style={{fontWeight:800,fontSize:13,color:C.text}}>{i+1}. {pt.topic}</div>
+        {(pt.details||[]).map((d,j)=><div key={j} style={{fontSize:12,color:C.text,paddingLeft:10,marginTop:2}}>• {d}</div>)}
+        {pt.decision&&<div style={{fontSize:12,color:C.primary,fontWeight:700,marginTop:3,paddingLeft:10}}>➡ {pt.decision}</div>}
+      </div>)}
+      {(p.openQuestions||[]).length>0&&<div style={{fontSize:12,color:"#92400e",background:"#fffbeb",borderRadius:8,padding:"6px 10px"}}><b>Offen:</b> {p.openQuestions.join(" · ")}</div>}
+      {!readOnly&&onSave&&<div style={{marginTop:8,textAlign:"right"}}><button onClick={()=>{if(window.confirm("Protokoll entfernen? Bereits übernommene Aufgaben bleiben erhalten.")){const {protocol:_,...rest}=item;onSave(rest);}}} style={{background:"none",border:"none",color:"#ef4444",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>Protokoll entfernen</button></div>}
+    </div>}
+    {modal&&<Modal title={`📝 Protokoll einlesen`} onClose={()=>setModal(false)} wide><ProtocolImportModal kind={kind} item={item} onSave={onSave} onClose={()=>setModal(false)}/></Modal>}
+  </div>);
+}
+
+// ── ÜBUNG EINSPRECHEN: Interpretation, Rückfragen und Skizze ───────
+const SK_COLORS = {red:"#dc2626",rot:"#dc2626",blue:"#2563eb",blau:"#2563eb",yellow:"#eab308",gelb:"#eab308",orange:"#f97316",green:"#16a34a","grün":"#16a34a",white:"#ffffff","weiß":"#ffffff",black:"#111827",schwarz:"#111827",gray:"#6b7280",grey:"#6b7280",grau:"#6b7280",pink:"#ec4899",purple:"#9333ea",lila:"#9333ea"};
+const skColor = (c,def) => { if(!c) return def; const k=String(c).toLowerCase().trim(); return SK_COLORS[k]||(/^#[0-9a-f]{3,8}$/i.test(k)?k:def); };
+const skNum = (v,min,max,def) => { const n=Number(v); return Number.isFinite(n)?Math.min(max,Math.max(min,n)):def; };
+const xe = s => String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+const fmtM = n => (Math.round(n*10)/10).toString().replace(".",",");
+// Skizze im Trainer-Stil (Rasenstreifen, Strichmännchen, Hütchen, Tore, Pfeile, Maße) aus einer Szenenbeschreibung in Metern zeichnen
+function renderSketchSvg(sk) {
+  if(!sk||typeof sk!=="object") return "";
+  const fw=skNum(sk.field?.w,4,120,20), fh=skNum(sk.field?.h,4,120,15);
+  const W=1000, M=70, maxH=720;
+  const k=Math.min((W-2*M)/fw,(maxH-2*M)/fh), pw=fw*k, ph=fh*k;
+  const X=x=>M+skNum(x,-3,fw+3,0)*k, Y=y=>M+skNum(y,-3,fh+3,0)*k;
+  const pt=p=>Array.isArray(p)?{x:p[0],y:p[1]}:(p||{});
+  const teamsDef={A:{name:"Team A",color:"#dc2626"},B:{name:"Team B",color:"#2563eb"},C:{name:"Team C",color:"#eab308"},D:{name:"Team D",color:"#9333ea"},K:{name:"Trainer/Torwart",color:"#374151"}};
+  const teams={}; Object.keys(teamsDef).forEach(t=>{ const o=sk.teams?.[t]||{}; teams[t]={name:String(o.name||teamsDef[t].name).slice(0,24),color:skColor(o.color,teamsDef[t].color)}; });
+  const players=(Array.isArray(sk.players)?sk.players:[]).slice(0,40), cones=(Array.isArray(sk.cones)?sk.cones:[]).slice(0,60), balls=(Array.isArray(sk.balls)?sk.balls:[]).slice(0,20);
+  const arrows=(Array.isArray(sk.arrows)?sk.arrows:[]).slice(0,40), zones=(Array.isArray(sk.zones)?sk.zones:[]).slice(0,12), goals=(Array.isArray(sk.goals)?sk.goals:[]).slice(0,8), labels=(Array.isArray(sk.labels)?sk.labels:[]).slice(0,20);
+  const kinds={run:{c:"#ffffff",w:3.5,dash:"",name:"Laufweg"},pass:{c:"#ffffff",w:3.5,dash:"11 8",name:"Pass"},dribble:{c:"#fde047",w:3.5,dash:"",name:"Dribbling",wavy:true},shot:{c:"#ef4444",w:6,dash:"",name:"Schuss"}};
+  const usedKinds=[...new Set(arrows.map(a=>kinds[a.kind]?a.kind:"run"))];
+  const usedTeams=[...new Set(players.map(p=>teams[p.team]?p.team:"A"))];
+  const legend=[...usedTeams.map(t=>({type:"team",t})),...usedKinds.map(kd=>({type:"kind",kd}))];
+  const legH=legend.length?(Math.ceil(legend.length/4)*34+14):0;
+  const H=Math.round(ph+2*M+legH);
+  let o=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="Arial, Helvetica, sans-serif"><rect width="${W}" height="${H}" fill="#ffffff"/>`;
+  o+=`<defs>${Object.entries(kinds).map(([id,kd])=>`<marker id="ah-${id}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="${id==="shot"?5:6.5}" markerHeight="${id==="shot"?5:6.5}" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${kd.c}"/></marker>`).join("")}</defs>`;
+  // Rasen mit Streifen
+  o+=`<rect x="${M}" y="${M}" width="${pw}" height="${ph}" fill="#4caf50"/>`;
+  const n=Math.max(2,Math.round(fw/2.5));
+  for(let i=0;i<n;i+=2) o+=`<rect x="${M+i*pw/n}" y="${M}" width="${pw/n}" height="${ph}" fill="#43a047"/>`;
+  o+=`<rect x="${M}" y="${M}" width="${pw}" height="${ph}" fill="none" stroke="#ffffff" stroke-width="4"/>`;
+  // Maße
+  o+=`<g stroke="#334155" stroke-width="2" fill="#334155"><line x1="${M}" y1="${M-30}" x2="${M+pw}" y2="${M-30}"/><line x1="${M}" y1="${M-38}" x2="${M}" y2="${M-22}"/><line x1="${M+pw}" y1="${M-38}" x2="${M+pw}" y2="${M-22}"/><text x="${M+pw/2}" y="${M-38}" text-anchor="middle" font-size="22" font-weight="700" stroke="none">${fmtM(fw)} m</text>`;
+  o+=`<line x1="${M-30}" y1="${M}" x2="${M-30}" y2="${M+ph}"/><line x1="${M-38}" y1="${M}" x2="${M-22}" y2="${M}"/><line x1="${M-38}" y1="${M+ph}" x2="${M-22}" y2="${M+ph}"/><text transform="translate(${M-40},${M+ph/2}) rotate(-90)" text-anchor="middle" font-size="22" font-weight="700" stroke="none">${fmtM(fh)} m</text></g>`;
+  // Zonen
+  zones.forEach(z=>{ const x=skNum(z.x,-3,fw,0),y=skNum(z.y,-3,fh,0),w=skNum(z.w,0.5,fw+6,3),h=skNum(z.h,0.5,fh+6,3); const col=skColor(z.color,"#ffffff");
+    o+=`<rect x="${X(x)}" y="${Y(y)}" width="${w*k}" height="${h*k}" fill="${col}" fill-opacity="0.2" stroke="#ffffff" stroke-width="3" stroke-dasharray="12 8"/>`;
+    if(z.label) o+=`<text x="${X(x)+8}" y="${Y(y)+24}" font-size="20" font-weight="700" fill="#ffffff" stroke="#14532d" stroke-width="4" paint-order="stroke">${xe(String(z.label).slice(0,30))}</text>`; });
+  // Tore
+  goals.forEach(g=>{ const gx=skNum(g.x,-3,fw+3,fw/2), gy=skNum(g.y,-3,fh+3,0); const gw=skNum(g.w,0.5,12,3)*k, dep=Math.max(14,1.1*k);
+    const side=["top","bottom","left","right"].includes(g.side)?g.side:(Math.abs(gy-fh/2)>=Math.abs(gx-fw/2)?(gy<fh/2?"top":"bottom"):(gx<fw/2?"left":"right"));
+    const horiz=side==="top"||side==="bottom"; const w=horiz?gw:dep, h=horiz?dep:gw;
+    o+=`<rect x="${X(gx)-w/2}" y="${Y(gy)-h/2}" width="${w}" height="${h}" fill="#ffffff" fill-opacity="0.35" stroke="#ffffff" stroke-width="4"/>`;
+    const lines=Math.max(3,Math.round((horiz?w:h)/14)); for(let i=1;i<lines;i++){ o+=horiz?`<line x1="${X(gx)-w/2+i*w/lines}" y1="${Y(gy)-h/2}" x2="${X(gx)-w/2+i*w/lines}" y2="${Y(gy)+h/2}" stroke="#ffffff" stroke-opacity="0.6" stroke-width="1.5"/>`:`<line x1="${X(gx)-w/2}" y1="${Y(gy)-h/2+i*h/lines}" x2="${X(gx)+w/2}" y2="${Y(gy)-h/2+i*h/lines}" stroke="#ffffff" stroke-opacity="0.6" stroke-width="1.5"/>`; } });
+  // Pfeile
+  arrows.forEach(a=>{ const kd=kinds[a.kind]?a.kind:"run", st=kinds[kd]; let pts=[pt(a.from),...(Array.isArray(a.via)?a.via.map(pt):[]),pt(a.to)].filter(p=>Number.isFinite(Number(p.x))&&Number.isFinite(Number(p.y))).map(p=>({x:X(p.x),y:Y(p.y)}));
+    if(pts.length<2) return;
+    if(st.wavy){ const out=[]; pts.forEach((p,i)=>{ if(i===0){ out.push(p); return; } const q=pts[i-1], len=Math.hypot(p.x-q.x,p.y-q.y), steps=Math.max(2,Math.round(len/4)), nx=-(p.y-q.y)/(len||1), ny=(p.x-q.x)/(len||1); for(let s=1;s<=steps;s++){ const t=s/steps, off=(s===steps?0:Math.sin(t*len/26*2*Math.PI)*5); out.push({x:q.x+(p.x-q.x)*t+nx*off,y:q.y+(p.y-q.y)*t+ny*off}); } }); pts=out; }
+    o+=`<polyline points="${pts.map(p=>`${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ")}" fill="none" stroke="${st.c}" stroke-width="${st.w}" ${st.dash?`stroke-dasharray="${st.dash}"`:""} stroke-linejoin="round" stroke-linecap="round" marker-end="url(#ah-${kd})"/>`; });
+  // Hütchen
+  cones.forEach(c=>{ const x=X(c.x),y=Y(c.y),col=skColor(c.color,"#f97316"); o+=`<polygon points="${x},${y-11} ${x-9},${y+8} ${x+9},${y+8}" fill="${col}" stroke="#7c2d12" stroke-width="1.5"/>`; });
+  // Bälle
+  balls.forEach(b=>{ const x=X(b.x),y=Y(b.y); o+=`<circle cx="${x}" cy="${y}" r="8" fill="#ffffff" stroke="#111827" stroke-width="2"/><circle cx="${x}" cy="${y}" r="3" fill="#111827"/>`; });
+  // Spieler als Strichmännchen im Trikot
+  players.forEach(p=>{ const t=teams[p.team]?p.team:"A", col=teams[t].color, x=X(p.x), y=Y(p.y);
+    o+=`<g stroke="#111827" stroke-width="2.5" stroke-linecap="round"><line x1="${x-5}" y1="${y+2}" x2="${x-8}" y2="${y+18}"/><line x1="${x+5}" y1="${y+2}" x2="${x+8}" y2="${y+18}"/><line x1="${x-9}" y1="${y-14}" x2="${x-15}" y2="${y-3}"/><line x1="${x+9}" y1="${y-14}" x2="${x+15}" y2="${y-3}"/></g>`;
+    o+=`<rect x="${x-9}" y="${y-18}" width="18" height="21" rx="4" fill="${col}" stroke="#111827" stroke-width="2"/><circle cx="${x}" cy="${y-27}" r="8" fill="#f5d0a9" stroke="#111827" stroke-width="2"/>`;
+    if(p.label!==undefined&&p.label!=="") o+=`<text x="${x}" y="${y-5}" text-anchor="middle" font-size="12" font-weight="800" fill="${t==="C"?"#111827":"#ffffff"}">${xe(String(p.label).slice(0,2))}</text>`; });
+  // Beschriftungen
+  labels.forEach(l=>{ if(!l.text) return; o+=`<text x="${X(l.x)}" y="${Y(l.y)}" text-anchor="middle" font-size="${skNum(l.size,12,40,22)}" font-weight="700" fill="#ffffff" stroke="#14532d" stroke-width="4" paint-order="stroke">${xe(String(l.text).slice(0,40))}</text>`; });
+  // Legende
+  legend.forEach((it,i)=>{ const col=i%4, row=Math.floor(i/4), lx=M+col*225, ly=M+ph+26+row*34;
+    if(it.type==="team") o+=`<rect x="${lx}" y="${ly-14}" width="20" height="20" rx="4" fill="${teams[it.t].color}" stroke="#111827" stroke-width="2"/><text x="${lx+28}" y="${ly+2}" font-size="19" fill="#111827">${xe(teams[it.t].name)}</text>`;
+    else { const st=kinds[it.kd]; o+=`<line x1="${lx}" y1="${ly-4}" x2="${lx+38}" y2="${ly-4}" stroke="${it.kd==="run"||it.kd==="pass"?"#64748b":st.c}" stroke-width="${st.w}" ${st.dash?`stroke-dasharray="${st.dash}"`:""}/><text x="${lx+48}" y="${ly+2}" font-size="19" fill="#111827">${st.name}</text>`; } });
+  return o+"</svg>";
+}
+const svgToDataUrl = svg => "data:image/svg+xml;charset=utf-8,"+encodeURIComponent(svg);
+function svgToPngDataUrl(svg,width=1000) {
+  return new Promise((res,rej)=>{
+    const img=new Image();
+    img.onload=()=>{ try{ const c=document.createElement("canvas"); const sc=width/(img.width||width); c.width=width; c.height=Math.round((img.height||width*0.7)*sc); const g=c.getContext("2d"); g.fillStyle="#fff"; g.fillRect(0,0,c.width,c.height); g.drawImage(img,0,0,c.width,c.height); res(c.toDataURL("image/png")); }catch(e){ rej(e); } };
+    img.onerror=()=>rej(new Error("Skizze konnte nicht umgewandelt werden"));
+    img.src=svgToDataUrl(svg);
+  });
+}
+const EXERCISE_SYS = catList => `Du bist erfahrener Jugendfußball-Trainer und Autor von Trainingsübungen (Schwerpunkt G-Jugend/U7: Kinder 6–7 Jahre, Funino, meist 10–16 Kinder, kleine Felder, Minitore, Hütchen, spielerisch, wenig Wartezeit, wenige einfache Regeln). Du bekommst die gesprochene Beschreibung einer Übung. Sie kann ungenau, lückenhaft, mehrdeutig sein oder Spracherkennungsfehler enthalten (z. B. „Hüdchen“ = Hütchen). Wandle sie in eine saubere Übung samt Skizze um.
+
+ANTWORTFORMAT – antworte NUR mit JSON (kein Codeblock, kein Text davor/danach), genau eines von zwei Formaten:
+A) Rückfragen nötig:
+{"status":"needs_info","understanding":"1–2 Sätze: was du bisher verstanden hast","questions":[{"q":"konkrete Frage","why":"kurz: warum das wichtig ist","options":["Vorschlag 1","Vorschlag 2","Vorschlag 3"]}]}
+B) Fertig:
+{"status":"ready","understanding":"1–2 Sätze","assumptions":["getroffene Annahme 1"],"exercise":{"title":"","category":"<eins von: ${catList}>","description":"Ablauf und Regeln als klare nummerierte Schritte","setup":"Aufbau mit Maßen, Positionen, Materialien","material":[],"minPlayers":4,"maxPlayers":12,"duration":10,"tags":[],"source":"Spracheingabe","notes":"Coaching-Hinweise, Varianten, Steigerungen (optional)"},"sketch":{...}}
+Erlaubte tags: ${PTAGS.join(", ")}.
+
+WANN NACHFRAGEN (Format A):
+- Nur wenn ohne die Antwort die Übung nicht sinnvoll beschreibbar oder skizzierbar ist oder Angaben mehrdeutig/widersprüchlich sind: Ablauf/Regeln/Ziel unklar, Anzahl Kinder/Teams offen, wer läuft/dribbelt/passt wohin, Positionen von Hütchen/Toren/Zonen unklar, Feldgröße nötig aber nicht ableitbar, Bezüge wie „wie bei der letzten Übung“.
+- Höchstens 4 Fragen, kurz, konkret, jeweils 2–4 sinnvolle Antwortvorschläge (options), damit man nur antippen muss. Keine Fragen, die du fachlich sinnvoll selbst beantworten kannst (übliche Feldgrößen, Material, Dauer, Kategorie, Tags) – triff dann eine Annahme und liste sie in "assumptions".
+- Nach der zweiten Frage-Runde oder wenn die Person „mach einfach“ o. ä. sagt: IMMER Format B mit Annahmen.
+
+SKIZZE ("sketch"): Szene in METERN von oben gesehen. Ursprung oben links, x nach rechts (0..w), y nach unten (0..h). Alle Positionen liegen innerhalb des Feldes (Tore dürfen auf der Linie stehen). Übersichtlich halten, nur das Wesentliche zeigen, realistische Abstände für 6–7-Jährige (typisch 10–25 m).
+{"field":{"w":20,"h":15},
+ "zones":[{"x":0,"y":0,"w":10,"h":15,"label":"Zone A","color":"white"}],
+ "goals":[{"x":10,"y":0,"w":3,"side":"top"}],
+ "cones":[{"x":2,"y":3,"color":"orange"}],
+ "players":[{"x":5,"y":7,"team":"A","label":"1"}],
+ "balls":[{"x":5.6,"y":7.4}],
+ "arrows":[{"kind":"run","from":{"x":5,"y":7},"to":{"x":9,"y":3}}],
+ "labels":[{"x":10,"y":14,"text":"Start"}],
+ "teams":{"A":{"name":"Rot","color":"red"},"B":{"name":"Blau","color":"blue"}}}
+kind: "run" (Laufweg), "pass" (Pass, gestrichelt), "dribble" (Dribbling, gewellt), "shot" (Schuss). Optional "via":[{"x":..,"y":..}] für Knickpunkte. team: A, B, C, D (Mannschaften/Gruppen), K (Trainer/Torwart). Nicht benötigte Listen einfach leer lassen.
+
+Sprache: Deutsch, sachlich, für Trainer geschrieben. Erfinde keine Regeln, die nicht genannt oder zwingend nötig sind; kennzeichne notwendige Ergänzungen als Annahmen.`;
+const normEx = e => {
+  const cat=String(e.category||"").trim();
+  const arr=v=>(Array.isArray(v)?v:[]).map(x=>String(x).trim()).filter(Boolean);
+  return {
+    title:String(e.title||"").trim(),
+    category:CATS[normCat(cat)]?normCat(cat):"uebung",
+    description:Array.isArray(e.description)?e.description.join("\n"):String(e.description||"").trim(),
+    setup:Array.isArray(e.setup)?e.setup.join("\n"):String(e.setup||"").trim(),
+    material:arr(e.material), tags:arr(e.tags),
+    minPlayers:skNum(e.minPlayers,1,40,4), maxPlayers:skNum(e.maxPlayers,1,40,12), duration:skNum(e.duration,1,90,10),
+    source:String(e.source||"Spracheingabe").trim(), notes:Array.isArray(e.notes)?e.notes.join("\n"):String(e.notes||"").trim(),
+  };
+};
+function VoiceExerciseModal({onSave,onClose}) {
+  const ctx=React.useContext(AiCtx);
+  const [stage,setStage]=useState("input"); // input | questions | ready
+  const [text,setText]=useState("");
+  const [msgs,setMsgs]=useState([]);
+  const [rounds,setRounds]=useState(0);
+  const [qa,setQa]=useState(null);
+  const [answers,setAnswers]=useState([]);
+  const [res,setRes]=useState(null);
+  const [ex,setEx]=useState(null);
+  const [tweak,setTweak]=useState("");
+  const [useSketch,setUseSketch]=useState(true);
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState("");
+  const catList=Object.entries(CATS).map(([k,v])=>`${k} (${v.label})`).join(", ");
+  useEffect(()=>{ if(res) setEx({...res.exercise}); },[res]);
+  const svg=React.useMemo(()=>res?.sketch?renderSketchSvg(res.sketch):"",[res]);
+  const call=async newMsgs=>{
+    setBusy(true); setErr("");
+    try{
+      const out=await aiComplete({system:EXERCISE_SYS(catList),messages:newMsgs,apiKey:ctx.apiKey,maxTokens:6000});
+      const d=extractJson(out);
+      if(!d||!d.status) throw new Error("Die KI-Antwort war nicht auswertbar – bitte erneut versuchen.");
+      setMsgs([...newMsgs,{role:"assistant",content:JSON.stringify(d)}]);
+      if(d.status==="needs_info"&&Array.isArray(d.questions)&&d.questions.length){
+        const qs=d.questions.slice(0,4).map(q=>({q:String(q.q||""),why:String(q.why||""),options:(Array.isArray(q.options)?q.options:[]).map(String).slice(0,4)})).filter(q=>q.q);
+        setQa({understanding:String(d.understanding||""),questions:qs}); setAnswers(qs.map(()=>"")); setStage("questions");
+      } else if(d.exercise?.title){
+        setRes({exercise:normEx(d.exercise),sketch:d.sketch||null,assumptions:(Array.isArray(d.assumptions)?d.assumptions:[]).map(String),understanding:String(d.understanding||"")}); setStage("ready");
+      } else throw new Error("Die KI hat weder Rückfragen noch eine Übung geliefert – bitte genauer beschreiben.");
+    }catch(e){ setErr(e.message); }
+    setBusy(false);
+  };
+  const start=()=>{ if(text.trim()) call([{role:"user",content:`Beschreibung der Übung (gesprochen):\n${text.trim()}`}]); };
+  const sendAnswers=force=>{
+    const lines=qa.questions.map((q,i)=>`Frage ${i+1}: ${q.q}\nAntwort: ${(answers[i]||"").trim()||"(keine Angabe – bitte sinnvoll annehmen)"}`).join("\n\n");
+    const nr=rounds+1; setRounds(nr);
+    call([...msgs,{role:"user",content:lines+((force||nr>=2)?"\n\nBitte jetzt die Übung fertigstellen (status ready) und fehlende Details als Annahmen kennzeichnen.":"")}]);
+  };
+  const sendTweak=()=>{ const t=tweak.trim(); if(!t) return; setTweak(""); call([...msgs,{role:"user",content:`Änderungswunsch: ${t}\nGib die komplette aktualisierte Übung samt Skizze erneut als JSON mit status ready zurück.`}]); };
+  const save=async()=>{
+    setBusy(true);
+    let imageUrl="";
+    if(useSketch&&svg){ try{ imageUrl=await svgToPngDataUrl(svg); }catch(_){ imageUrl=svgToDataUrl(svg); } }
+    onSave({...ex,title:ex.title.trim(),id:uid(),createdAt:now(),updatedAt:now(),imageUrl});
+    setBusy(false);
+  };
+  const setE=(k,v)=>setEx(e=>({...e,[k]:v}));
+  const list=v=>(v||[]).join(", ");
+  const parseList=v=>v.split(",").map(x=>x.trim()).filter(Boolean);
+  const chip=on=>({padding:"6px 12px",borderRadius:20,border:`1.5px solid ${on?C.primary:C.border}`,background:on?C.accentL:C.card,color:on?C.primary:C.text,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"});
+  if(!ctx.apiKey) return(<div><div style={{background:"#fffbeb",border:"1px solid #fde68a",borderRadius:10,padding:"12px 14px",fontSize:13,color:"#92400e",marginBottom:14}}>Für die KI-Funktionen fehlt der API-Key. Trage ihn unter <b>Einstellungen → KI API-Key</b> ein.</div><div style={{textAlign:"right"}}><Btn variant="secondary" onClick={onClose}>Schließen</Btn></div></div>);
+  if(stage==="input") return(<div>
+    <div style={{background:"#faf5ff",borderRadius:10,padding:"12px 14px",marginBottom:14,border:"1px solid #e9d5ff",fontSize:13,color:"#6d28d9"}}>🎙 Sprich die Übung einfach ein – Aufbau, Ablauf, Regeln, wie viele Kinder, welches Material. Die KI macht daraus eine Übung samt Skizze und fragt nach, wenn etwas unklar ist.</div>
+    <DictationField value={text} onChange={setText} rows={9} placeholder="z. B. „Wir bauen ein Feld von 15 mal 10 Metern auf, zwei Teams, rot und blau, jedes Kind hat einen Ball …“"/>
+    {err&&<div style={{color:"#ef4444",fontSize:13,marginBottom:12,fontWeight:600}}>❌ {err}</div>}
+    <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Btn variant="secondary" onClick={onClose}>Abbrechen</Btn>
+      <Btn variant="ai" onClick={start} disabled={busy||!text.trim()}>{busy?<><RefreshCw size={14} style={{animation:"spin 1s linear infinite"}}/> Denke nach …</>:<><Bot size={14}/> Übung erstellen</>}</Btn></div>
+  </div>);
+  if(stage==="questions"&&qa) return(<div>
+    {qa.understanding&&<div style={{background:"#f0fdf4",border:`1px solid ${C.accent}`,borderRadius:10,padding:"10px 14px",marginBottom:14,fontSize:13,color:C.text}}><b>So habe ich es verstanden:</b> {qa.understanding}</div>}
+    <div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:8}}>Ein paar Rückfragen, damit die Übung stimmt:</div>
+    {qa.questions.map((q,i)=><div key={i} style={{padding:"11px 14px",borderRadius:12,border:`1.5px solid ${C.border}`,background:C.card,marginBottom:10}}>
+      <div style={{fontWeight:800,fontSize:14,color:C.text}}>{i+1}. {q.q}</div>
+      {q.why&&<div style={{fontSize:12,color:C.muted,marginTop:2}}>{q.why}</div>}
+      {q.options.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:8}}>{q.options.map(o=><button key={o} onClick={()=>setAnswers(a=>a.map((x,j)=>j===i?(x===o?"":o):x))} style={chip(answers[i]===o)}>{o}</button>)}</div>}
+      <input value={answers[i]||""} onChange={e=>setAnswers(a=>a.map((x,j)=>j===i?e.target.value:x))} placeholder="Eigene Antwort …" style={{width:"100%",marginTop:8,padding:"8px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:14,color:C.text,background:"white",fontFamily:"inherit",outline:"none",boxSizing:"border-box"}}/>
+    </div>)}
+    {err&&<div style={{color:"#ef4444",fontSize:13,marginBottom:12,fontWeight:600}}>❌ {err}</div>}
+    <div style={{display:"flex",gap:8,justifyContent:"flex-end",flexWrap:"wrap"}}>
+      <Btn variant="secondary" onClick={()=>{setStage("input");setMsgs([]);setRounds(0);}}>← Beschreibung ändern</Btn>
+      <Btn variant="secondary" onClick={()=>sendAnswers(true)} disabled={busy}>Egal – sinnvoll annehmen</Btn>
+      <Btn variant="ai" onClick={()=>sendAnswers(false)} disabled={busy}>{busy?<><RefreshCw size={14} style={{animation:"spin 1s linear infinite"}}/> Denke nach …</>:"Weiter"}</Btn>
+    </div>
+  </div>);
+  if(!res||!ex) return null;
+  return(<div>
+    {res.understanding&&<div style={{fontSize:13,color:C.muted,marginBottom:10}}>{res.understanding}</div>}
+    {res.assumptions.length>0&&<div style={{background:"#fffbeb",border:"1px solid #fde68a",borderRadius:10,padding:"9px 12px",marginBottom:12,fontSize:13,color:"#92400e"}}><b>Annahmen der KI – bitte prüfen:</b>{res.assumptions.map((a,i)=><div key={i}>• {a}</div>)}</div>}
+    {svg?<div style={{marginBottom:10}}><img src={svgToDataUrl(svg)} alt="Skizze" style={{width:"100%",borderRadius:10,border:`1px solid ${C.border}`,display:"block"}}/>
+      <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:C.text,marginTop:6}}><input type="checkbox" checked={useSketch} onChange={e=>setUseSketch(e.target.checked)}/> Skizze zur Übung speichern</label></div>
+      :<div style={{fontSize:13,color:C.muted,marginBottom:10}}>Es wurde keine Skizze erstellt – du kannst unten eine per Änderungswunsch anfordern.</div>}
+    <DictationField label="Änderungswunsch (Text oder Sprache)" value={tweak} onChange={setTweak} rows={2} placeholder="z. B. „Hütchen weiter auseinander“, „Tor an die andere Seite“, „nur 8 Kinder“"/>
+    <div style={{textAlign:"right",marginBottom:14}}><Btn sm variant="ai" onClick={sendTweak} disabled={busy||!tweak.trim()}>{busy?<><RefreshCw size={13} style={{animation:"spin 1s linear infinite"}}/> Passe an …</>:"Anpassen lassen"}</Btn></div>
+    <div style={{fontSize:11,color:C.muted,marginBottom:8}}>Direkt bearbeiten (bei „Anpassen lassen“ wird alles neu von der KI erzeugt):</div>
+    <Inp label="Titel *" value={ex.title} onChange={e=>setE("title",e.target.value)}/>
+    <Sel label="Kategorie" value={ex.category} onChange={e=>setE("category",e.target.value)}>{Object.entries(CATS).map(([k,v])=><option key={k} value={k}>{v.emoji} {v.label}</option>)}</Sel>
+    <Txta label="Ablauf" value={ex.description} onChange={e=>setE("description",e.target.value)} rows={6}/>
+    <Txta label="Aufbau" value={ex.setup} onChange={e=>setE("setup",e.target.value)} rows={3}/>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
+      <Inp label="Min. Kinder" type="number" min={1} value={ex.minPlayers} onChange={e=>setE("minPlayers",Number(e.target.value))}/>
+      <Inp label="Max. Kinder" type="number" min={1} value={ex.maxPlayers} onChange={e=>setE("maxPlayers",Number(e.target.value))}/>
+      <Inp label="Dauer (Min)" type="number" min={1} value={ex.duration} onChange={e=>setE("duration",Number(e.target.value))}/>
+    </div>
+    <Inp label="Material (Komma-getrennt)" value={list(ex.material)} onChange={e=>setE("material",parseList(e.target.value))}/>
+    <Inp label="Tags (Komma-getrennt)" value={list(ex.tags)} onChange={e=>setE("tags",parseList(e.target.value))}/>
+    <Txta label="Hinweise / Varianten" value={ex.notes} onChange={e=>setE("notes",e.target.value)} rows={3}/>
+    {err&&<div style={{color:"#ef4444",fontSize:13,marginBottom:12,fontWeight:600}}>❌ {err}</div>}
+    <div style={{display:"flex",gap:10,justifyContent:"flex-end",paddingTop:14,borderTop:`1px solid ${C.border}`}}>
+      <Btn variant="secondary" onClick={onClose}>Abbrechen</Btn>
+      <Btn onClick={save} disabled={busy||!ex.title.trim()}>Übung speichern</Btn>
+    </div>
+  </div>);
 }
 
 // ── DATENRETTUNG: lokal auf diesem Gerät gespeicherte Übungen/Aufstellungen finden und übernehmen ──
@@ -6930,6 +7442,9 @@ export default function App() {
     runPendingJoin(p,roles);
   },[user,memberships]); // eslint-disable-line
   const joinPromptEl=joinPrompt?<JoinRolePrompt onCancel={()=>{localStorage.removeItem("pendingJoin");setJoinPrompt(null);}} onConfirm={roles=>{localStorage.removeItem("pendingJoin");const p=joinPrompt;setJoinPrompt(null);runPendingJoin(p,roles);}}/>:null;
+  // KI-Bausteine (Protokoll, Übung einsprechen) brauchen API-Key, Aufgaben, Trainer und die Möglichkeit, Aufgaben anzulegen
+  const addTodos=list=>{ if(list&&list.length) setTodos(prev=>[...prev,...list]); };
+  const aiCtxValue={apiKey,todos,coaches,user,addTodos,toast};
   // Lokal gefundene Übungen/Aufstellungen ins aktuelle Team übernehmen (nur neue, nach ID) – Rückgabe: Anzahl neu übernommener Einträge
   const restoreLocal=(col,items)=>{
     const before=col==="exercises"?exercises:teamsets;
@@ -7028,7 +7543,7 @@ export default function App() {
   // In keiner Gruppe? → Onboarding (Team anlegen oder beitreten). Jeder eingeloggte Nutzer landet hier,
   // niemand wird mehr global blockiert.
   if(memberships.length===0||!currentGroupId) return <><GroupOnboarding user={user} onLogout={logout} toast={toast}/>{joinPromptEl}</>;
-  return(<RoleSwitchCtx.Provider value={{views:roleViews,viewRole:role,realRole,setViewRole,teams:(memberships||[]).map(m=>({id:m.groupId,name:allGroups.find(g=>g.id===m.groupId)?.name||m.groupId,role:m.role,roles:memberRoles(m)})),currentTeamId:currentGroupId,switchTeam:switchGroup,manageTeams:()=>setPage("settings"),logout}}><div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:C.bg,minHeight:"100vh"}}>
+  return(<RoleSwitchCtx.Provider value={{views:roleViews,viewRole:role,realRole,setViewRole,teams:(memberships||[]).map(m=>({id:m.groupId,name:allGroups.find(g=>g.id===m.groupId)?.name||m.groupId,role:m.role,roles:memberRoles(m)})),currentTeamId:currentGroupId,switchTeam:switchGroup,manageTeams:()=>setPage("settings"),logout}}><AiCtx.Provider value={aiCtxValue}><div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:C.bg,minHeight:"100vh"}}>
     <style>{`*{box-sizing:border-box}body{margin:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}`}</style>
     <Toasts/>
     {joinPromptEl}
@@ -7056,5 +7571,5 @@ export default function App() {
       <button onClick={undoBuf.restore} style={{background:"#3b82f6",color:"white",border:"none",borderRadius:8,padding:"6px 14px",fontSize:13,fontWeight:800,cursor:"pointer",whiteSpace:"nowrap"}}>↩ Rückgängig</button>
       <button onClick={()=>{clearTimeout(undoBuf.t);setUndoBuf(null);}} style={{background:"none",border:"none",color:"#94a3b8",cursor:"pointer",fontSize:18,lineHeight:1,padding:"0 2px"}}>✕</button>
     </div>}
-  </div></RoleSwitchCtx.Provider>);
+  </div></AiCtx.Provider></RoleSwitchCtx.Provider>);
 }
