@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import Dexie from "dexie";
 import { initializeApp } from "firebase/app";
-import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile, sendPasswordResetEmail } from "firebase/auth";
+import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile, sendPasswordResetEmail, deleteUser as fbDeleteUser, reauthenticateWithCredential, reauthenticateWithPopup, EmailAuthProvider } from "firebase/auth";
 import { getFirestore, doc, getDoc, setDoc, onSnapshot, deleteDoc, collection, addDoc, query, orderBy, limit, getDocs, serverTimestamp, where } from "firebase/firestore";
 import { Home, ArrowLeft, Menu, X, BookOpen, Users, CalendarDays, Settings, Plus, Search, Edit2, Trash2, Download, Upload, Shuffle, Filter, Clock, Trophy, Bot, RefreshCw, CheckSquare, Square, Dices, ListChecks, Wallet, Phone, MapPin, AlertTriangle, ShieldCheck, ClipboardList, Star } from "lucide-react";
 
@@ -326,6 +326,7 @@ function useRole(user) {
         if(Object.keys(updates).length>0) setDoc(doc(fbDb,"roles",user.uid),updates,{merge:true}).catch(()=>{});
         setRole(snap.data().role||"pending");
       } else {
+        if(ACCOUNT_DELETING) return;
         // New user: first ever = admin, otherwise pending
         try {
           const rolesSnap=await getDocs(collection(fbDb,"roles"));
@@ -374,8 +375,18 @@ function useRole(user) {
     if(!fbDb) return;
     await setDoc(doc(fbDb,"roles",uid),{name},{merge:true});
   };
+  // Entfernt den Nutzer aus der Datenbank: Rollen-Dokument, Mitgliedschaften und Beitrittswünsche in allen Teams, Presence.
+  // Das Anmeldekonto (Firebase Authentication) kann ein Admin aus der App heraus nicht löschen – nur der Nutzer selbst.
   const deleteUser=async(uid)=>{
     if(!fbDb) return;
+    try{
+      const gs=await getDocs(collection(fbDb,"groups"));
+      await Promise.all(gs.docs.flatMap(g=>[
+        deleteDoc(doc(fbDb,"groups",g.id,"members",uid)).catch(()=>{}),
+        deleteDoc(doc(fbDb,"groups",g.id,"joinRequests",uid)).catch(()=>{}),
+      ]));
+    }catch(e){ console.warn("deleteUser groups",e); }
+    await deleteDoc(doc(fbDb,"presence",uid)).catch(()=>{});
     await deleteDoc(doc(fbDb,"roles",uid));
   };
 
@@ -657,8 +668,10 @@ function buildRsvpEvents(sessions, tournaments) {
 }
 
 // ── PRESENCE ──────────────────────────────────────────────────────
+// true, solange das eigene Konto gelöscht wird (verhindert, dass Presence-/Rollen-Dokumente sofort neu angelegt werden)
+let ACCOUNT_DELETING = false;
 async function setPresence(user, online) {
-  if(!fbDb||!user) return;
+  if(!fbDb||!user||ACCOUNT_DELETING) return;
   try {
     await setDoc(doc(fbDb,"presence",user.uid),{
       uid:user.uid, name:user.displayName||user.email,
@@ -681,7 +694,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.34.0";
+const APP_VERSION = "3.35.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4795,7 +4808,7 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
     <PageHeader title="Einstellungen" sub={`Teammanager · v${APP_VERSION}`} onlineUsers={onlineUsers} currentUser={firebaseUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
     <GroupManagementPanel groupId={currentGroupId} role={role} memberships={memberships} onSwitchGroup={onSwitchGroup} toast={toast} firebaseUser={firebaseUser} players={players} onCreatePlayer={onCreatePlayer}/>
     {/* Simplified settings for trainer/eltern */}
-    {role==="trainer"&&<SimpleSettings role={role} apiKey={apiKey} onSaveApiKey={onSaveApiKey} prefs={prefs} onPrefChange={onPrefChange} onFontScale={onFontScale} firebaseUser={firebaseUser} onLogout={onLogout}/>}
+    {role==="trainer"&&<SimpleSettings role={role} memberships={memberships} toast={toast} apiKey={apiKey} onSaveApiKey={onSaveApiKey} prefs={prefs} onPrefChange={onPrefChange} onFontScale={onFontScale} firebaseUser={firebaseUser} onLogout={onLogout}/>}
     {/* Full settings for TRUE global admin only (technischer Betreiber) */}
     {isGlobalAdmin&&role==="admin"&&(()=>{
       const [stab,setStab]=useState("general");
@@ -4824,7 +4837,7 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
                     {Object.entries(USER_ROLES).map(([k,v])=><option key={k} value={k}>{v.emoji} {v.label}</option>)}
                   </select>
                   {!isSelf&&<button title="Sperren" onClick={()=>{if(window.confirm(`${u.name||u.email} sperren? Zugriff wird sofort entzogen.`))setUserRole(u.uid,"banned");}} style={{padding:"5px 8px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",cursor:"pointer",color:"#ef4444",fontSize:12,flexShrink:0}}>🚫</button>}
-                  {!isSelf&&<button title="Komplett löschen" onClick={()=>{if(window.confirm(`${u.name||u.email} komplett löschen? Der Nutzer kann sich erneut registrieren und landet dann auf "Ausstehend".`))deleteUser(u.uid);}} style={{padding:"5px 8px",borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",color:"#64748b",fontSize:12,flexShrink:0}}>🗑</button>}
+                  {!isSelf&&<button title="Komplett löschen" onClick={()=>{if(window.confirm(`${u.name||u.email} aus der Datenbank löschen? Rolle und alle Team-Mitgliedschaften werden entfernt.\n\nAchtung: Das Anmeldekonto (E-Mail/Passwort) bleibt bestehen. Damit sich die Person mit derselben E-Mail neu registrieren kann, muss das Konto zusätzlich in der Firebase Console (Authentication → Users) gelöscht werden – oder die Person löscht ihr Profil selbst in den Einstellungen.`))deleteUser(u.uid);}} style={{padding:"5px 8px",borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",color:"#64748b",fontSize:12,flexShrink:0}}>🗑</button>}
                 </div>
               </div>);
             })}
@@ -4849,6 +4862,7 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
       </div>
       <button onClick={onLogout} style={{padding:"5px 12px",borderRadius:8,border:"1px solid #bbf7d0",background:"white",color:"#166534",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>Abmelden</button>
     </div>}
+    <div style={{marginBottom:16}}><DeleteAccountCard firebaseUser={firebaseUser} memberships={memberships} toast={toast}/></div>
     <Sec title="🤖 Claude API" ch={<div style={{background:C.card,borderRadius:10,border:`1.5px solid ${C.border}`,padding:"16px 18px"}}>
       <div style={{fontSize:13,color:C.muted,marginBottom:10}}>API-Key von <a href="https://console.anthropic.com" target="_blank" style={{color:C.primary}}>console.anthropic.com</a> – wird nur lokal gespeichert.</div>
       <div style={{display:"flex",gap:8}}><input type={kv?"text":"password"} value={ki} onChange={e=>setKi(e.target.value)} placeholder="sk-ant-..." style={{flex:1,padding:"9px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:14,outline:"none",fontFamily:"monospace"}}/><Btn sm variant="secondary" onClick={()=>setKv(v=>!v)}>{kv?"🙈":"👁️"}</Btn><Btn sm onClick={()=>{onSaveApiKey(ki.trim());toast(ki.trim()?"API-Key gespeichert":"API-Key entfernt");}}>Speichern</Btn></div>
@@ -4874,6 +4888,78 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
         </div>}
       </div>);
     })()}
+  </div>);
+}
+
+// ── PROFIL LÖSCHEN (jeder Nutzer für sich selbst) ──────────────────
+function DeleteAccountCard({firebaseUser,memberships,toast}) {
+  const [open,setOpen]=useState(false);
+  const [pw,setPw]=useState("");
+  const [conf,setConf]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState("");
+  const isPw=(firebaseUser?.providerData||[]).some(p=>p.providerId==="password");
+  const ready=conf.trim().toUpperCase()==="LÖSCHEN"&&(!isPw||pw.length>0);
+  const msg=c=>({"auth/wrong-password":"Passwort falsch","auth/invalid-credential":"Passwort falsch","auth/too-many-requests":"Zu viele Versuche – bitte kurz warten","auth/popup-closed-by-user":"Anmeldung abgebrochen","auth/popup-blocked":"Das Anmelde-Fenster wurde blockiert","auth/requires-recent-login":"Bitte melde dich neu an und versuche es noch einmal"}[c]||("Fehler: "+(c||"unbekannt")));
+  const run=async()=>{
+    if(!fbAuth||!fbDb||!fbAuth.currentUser) return;
+    setBusy(true); setErr("");
+    const u=fbAuth.currentUser;
+    try{
+      // 1) Sicherheitsabfrage: erneut anmelden
+      if(isPw) await reauthenticateWithCredential(u,EmailAuthProvider.credential(u.email,pw));
+      else await reauthenticateWithPopup(u,new GoogleAuthProvider());
+      // 2) Letzter Admin eines Teams? Dann nicht löschen – sonst wäre das Team ohne Admin
+      const blockers=[];
+      for(const m of (memberships||[])){
+        if(!memberRoles(m).includes("admin")) continue;
+        const snap=await getDocs(collection(fbDb,"groups",m.groupId,"members"));
+        const others=snap.docs.map(d=>d.data()).filter(x=>x.uid!==u.uid&&memberRoles(x).includes("admin"));
+        if(others.length===0){ const g=await getDoc(doc(fbDb,"groups",m.groupId)); blockers.push(g.exists()?(g.data().name||m.groupId):m.groupId); }
+      }
+      if(blockers.length){ setErr(`Du bist der einzige Admin von: ${blockers.join(", ")}. Ernenne zuerst einen weiteren Admin (Team-Verwaltung), dann kannst du dein Profil löschen.`); setBusy(false); return; }
+      // 3) Daten löschen (Mitgliedschaften, Beitrittswünsche, Presence, Profil)
+      ACCOUNT_DELETING=true;
+      const gs=await getDocs(collection(fbDb,"groups"));
+      await Promise.all(gs.docs.flatMap(g=>[
+        deleteDoc(doc(fbDb,"groups",g.id,"members",u.uid)).catch(()=>{}),
+        deleteDoc(doc(fbDb,"groups",g.id,"joinRequests",u.uid)).catch(()=>{}),
+      ]));
+      await deleteDoc(doc(fbDb,"presence",u.uid)).catch(()=>{});
+      await deleteDoc(doc(fbDb,"roles",u.uid)).catch(()=>{});
+      // 4) Lokale Einstellungen dieses Nutzers entfernen
+      try{ Object.keys(localStorage).filter(k=>k.includes(u.uid)).forEach(k=>localStorage.removeItem(k)); localStorage.removeItem("currentGroupId"); }catch(e){}
+      // 5) Zuletzt das Anmeldekonto selbst löschen
+      await fbDeleteUser(u);
+      toast("Dein Profil wurde gelöscht");
+      setTimeout(()=>{ACCOUNT_DELETING=false;},2000);
+    }catch(e){
+      console.warn("delete account",e);
+      ACCOUNT_DELETING=false;
+      setErr(msg(e.code));
+    }
+    setBusy(false);
+  };
+  return(<div style={{padding:"14px 16px",background:C.card,borderRadius:12,border:"1.5px solid #fecaca"}}>
+    <div style={{fontSize:12,fontWeight:800,color:"#b91c1c",textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>🗑 Profil löschen</div>
+    <div style={{fontSize:12,color:C.muted,marginBottom:10}}>Löscht dein Konto und deine Mitgliedschaften in allen Teams dauerhaft.</div>
+    <button onClick={()=>{setOpen(true);setErr("");setPw("");setConf("");}} style={{width:"100%",padding:"9px 0",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",color:"#b91c1c",fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>Mein Profil löschen …</button>
+    {open&&<Modal title="Profil endgültig löschen" onClose={()=>!busy&&setOpen(false)}>
+      <div style={{fontSize:13,color:C.text,lineHeight:1.5,marginBottom:10}}>
+        <b>Das wird gelöscht:</b> dein Anmeldekonto, deine Rollen und Mitgliedschaften in allen Teams (auch die Verknüpfung mit deinen Kindern bzw. deinem Spielerprofil) und offene Beitrittswünsche.
+      </div>
+      <div style={{fontSize:12,color:C.muted,lineHeight:1.5,marginBottom:12}}>
+        <b>Bleibt bestehen:</b> Spieler-/Kinderprofile und ihre Zu- und Absagen gehören zum Team. Ebenso bleiben Einträge im Aktivitätslog, die deinen Namen tragen (das Log ist unveränderlich).
+      </div>
+      {isPw&&<input type="password" value={pw} onChange={e=>setPw(e.target.value)} placeholder="Dein Passwort zur Bestätigung" style={{width:"100%",padding:"10px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:14,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit",boxSizing:"border-box",marginBottom:10}}/>}
+      {!isPw&&<div style={{fontSize:12,color:C.muted,marginBottom:10}}>Zur Bestätigung öffnet sich ein Google-Anmeldefenster.</div>}
+      <input value={conf} onChange={e=>setConf(e.target.value)} placeholder="Zur Bestätigung LÖSCHEN eintippen" style={{width:"100%",padding:"10px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:14,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
+      {err&&<div style={{fontSize:12,color:"#b91c1c",background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,padding:"8px 10px",marginTop:10}}>{err}</div>}
+      <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginTop:14}}>
+        <Btn variant="secondary" onClick={()=>setOpen(false)} disabled={busy}>Abbrechen</Btn>
+        <button onClick={run} disabled={busy||!ready} style={{padding:"9px 16px",borderRadius:8,border:"none",background:busy||!ready?"#fca5a5":"#dc2626",color:"white",fontWeight:800,fontSize:14,cursor:busy||!ready?"default":"pointer",fontFamily:"inherit"}}>{busy?"Lösche …":"Endgültig löschen"}</button>
+      </div>
+    </Modal>}
   </div>);
 }
 
@@ -4946,12 +5032,14 @@ function ParentSettingsPage({role,firebaseUser,groupId,memberships,onSwitchGroup
       <div style={card}>
         <button onClick={onLogout} style={{width:"100%",padding:"10px 0",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",color:"#ef4444",fontWeight:700,fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>🔓 Abmelden</button>
       </div>
+
+      <DeleteAccountCard firebaseUser={firebaseUser} memberships={memberships} toast={toast}/>
     </div>
   </div>);
 }
 
 // ── SIMPLE SETTINGS (Trainer/Eltern) ──────────────────────────────
-function SimpleSettings({role,apiKey,onSaveApiKey,prefs,onPrefChange,onFontScale,firebaseUser,onLogout}) {
+function SimpleSettings({role,apiKey,onSaveApiKey,prefs,onPrefChange,onFontScale,firebaseUser,onLogout,memberships,toast}) {
   const [apiInput,setApiInput]=useState(apiKey||"");
   const [saved,setSaved]=useState(false);
 
@@ -5008,6 +5096,8 @@ function SimpleSettings({role,apiKey,onSaveApiKey,prefs,onPrefChange,onFontScale
         🔓 Abmelden
       </button>
     </div>
+
+    <DeleteAccountCard firebaseUser={firebaseUser} memberships={memberships} toast={toast}/>
   </div>);
 }
 
@@ -5753,7 +5843,7 @@ function AuthScreen({onGoogle,onEmail,onRegister,onReset}) {
     "auth/user-not-found":"Kein Konto mit dieser E-Mail gefunden",
     "auth/wrong-password":"Falsches Passwort",
     "auth/invalid-credential":"E-Mail oder Passwort falsch",
-    "auth/email-already-in-use":"Diese E-Mail ist bereits registriert",
+    "auth/email-already-in-use":"Zu dieser E-Mail gibt es schon ein Anmeldekonto (auch wenn es im Team gelöscht wurde). Bitte anmelden oder „Passwort vergessen“ nutzen.",
     "auth/weak-password":"Passwort muss mindestens 6 Zeichen haben",
     "auth/invalid-email":"Ungültige E-Mail-Adresse",
     "auth/too-many-requests":"Zu viele Versuche. Bitte kurz warten.",
