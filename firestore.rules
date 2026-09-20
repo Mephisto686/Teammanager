@@ -44,11 +44,16 @@ service cloud.firestore {
     function groupOpen(groupId) {
       return get(/databases/$(database)/documents/groups/$(groupId)).data.get('openJoin', true) != false;
     }
-    // Gültiger Einladungscode dieses Teams (wird im Mitgliedsdokument als "joinCode" mitgeschickt)
+    // Gültiger Einladungscode dieses Teams (wird im Mitgliedsdokument als "joinCode" mitgeschickt).
+    // Der Code muss existieren (erneuerte Codes werden gelöscht) und darf nicht abgelaufen sein (expiresAtMs, leer = unbegrenzt).
     function validJoinCode(groupId) {
+      let codePath = /databases/$(database)/documents/inviteCodes/$(request.resource.data.joinCode);
       return ('joinCode' in request.resource.data)
-        && exists(/databases/$(database)/documents/inviteCodes/$(request.resource.data.joinCode))
-        && get(/databases/$(database)/documents/inviteCodes/$(request.resource.data.joinCode)).data.groupId == groupId;
+        && exists(codePath)
+        && get(codePath).data.groupId == groupId
+        && (!('expiresAtMs' in get(codePath).data)
+            || get(codePath).data.expiresAtMs == null
+            || request.time.toMillis() < get(codePath).data.expiresAtMs);
     }
     function canWriteGroup(groupId) {
       return isGlobalAdmin() ||
@@ -166,11 +171,18 @@ service cloud.firestore {
     }
 
     // ── EINLADUNGSCODES ──────────────────────────────────────────────
+    // Einzeln abrufbar (Code eingeben), aber nicht auflistbar. Anlegen, ändern (Gültigkeit) und löschen (Erneuern)
+    // dürfen nur Trainer/Admin des jeweiligen Teams – bzw. der Ersteller beim Anlegen eines neuen Teams.
     match /inviteCodes/{code} {
       allow get: if isSignedIn();
       allow list: if false;
-      allow create: if isSignedIn();
-      allow update, delete: if false;
+      allow create: if isSignedIn()
+        && request.resource.data.groupId is string
+        && (canWriteGroup(request.resource.data.groupId) || isGroupCreator(request.resource.data.groupId));
+      allow update: if isSignedIn()
+        && canWriteGroup(resource.data.groupId)
+        && request.resource.data.groupId == resource.data.groupId;
+      allow delete: if isSignedIn() && canWriteGroup(resource.data.groupId);
     }
 
     // ── PRESENCE ─────────────────────────────────────────────────────

@@ -133,8 +133,8 @@ async function createGroup(user, name) {
     await setDoc(doc(fbDb, "groups", groupId), {
       name: name.trim(), createdAt: new Date().toISOString(), createdBy: user.uid
     });
-    await setDoc(doc(fbDb, "groups", groupId, "settings", "invite"), { code });
-    await setDoc(doc(fbDb, "inviteCodes", code), { groupId });
+    await setDoc(doc(fbDb, "groups", groupId, "settings", "invite"), { code, expiresAtMs: null });
+    await setDoc(doc(fbDb, "inviteCodes", code), { groupId, expiresAtMs: null, createdAt: new Date().toISOString(), createdBy: user.uid });
     await setDoc(doc(fbDb, "groups", groupId, "members", user.uid), {
       uid: user.uid, role: "admin", name: user.displayName || "", email: user.email || "",
       photo: user.photoURL || null, joinedAt: new Date().toISOString()
@@ -176,7 +176,9 @@ async function joinGroupByCode(user, code, roles = ["eltern"]) {
     const c = code.trim().toUpperCase();
     const codeSnap = await getDoc(doc(fbDb, "inviteCodes", c));
     if (!codeSnap.exists()) return { ok: false, error: "invalid-code" };
-    return await joinCore(user, codeSnap.data().groupId, roles, { code: c });
+    const cd = codeSnap.data();
+    if (cd.expiresAtMs && Date.now() > cd.expiresAtMs) return { ok: false, error: "expired-code" };
+    return await joinCore(user, cd.groupId, roles, { code: c });
   } catch (e) { return { ok: false, error: e.code || "unknown" }; }
 }
 // Beitritt über die Team-Auswahl ohne Code: nur in offenen Teams sofort (Standard), sonst Beitrittswunsch
@@ -743,7 +745,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.37.1";
+const APP_VERSION = "3.38.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4608,18 +4610,58 @@ function RolePicker({value,onChange}) {
   </div>);
 }
 
+// ── EINLADUNGSCODE: Gültigkeit & Erneuern ─────────────────────────
+const INVITE_DAY_OPTIONS = [{d:0,l:"Unbegrenzt"},{d:7,l:"7 Tage"},{d:30,l:"30 Tage"}];
+const inviteExpiryMs = days => days>0 ? Date.now()+days*86400000 : null;
+const joinErrorText = e => e==="invalid-code" ? "Code ungültig" : e==="expired-code" ? "Der Einladungslink ist abgelaufen – bitte um einen neuen Code oder Link" : "Fehler: "+e;
+// Neuen Code anlegen (mit Gültigkeit); der bisherige Code wird gelöscht und damit ungültig
+async function createInviteCode(groupId, days, user, oldCode) {
+  let code="";
+  for(let i=0;i<10;i++){ code=genInviteCode(); if(!(await getDoc(doc(fbDb,"inviteCodes",code))).exists()) break; }
+  const expiresAtMs=inviteExpiryMs(days);
+  await setDoc(doc(fbDb,"inviteCodes",code),{groupId,expiresAtMs,createdAt:new Date().toISOString(),createdBy:user?.uid||""});
+  await setDoc(doc(fbDb,"groups",groupId,"settings","invite"),{code,expiresAtMs});
+  if(oldCode&&oldCode!==code){ try{ await deleteDoc(doc(fbDb,"inviteCodes",oldCode)); }catch(e){ console.warn("alter Code nicht gelöscht",e); } }
+  return {code,expiresAtMs};
+}
+// Gültigkeit des aktuellen Codes ändern (gerechnet ab jetzt)
+async function setInviteExpiry(groupId, code, days) {
+  const ms=inviteExpiryMs(days);
+  await setDoc(doc(fbDb,"inviteCodes",code),{expiresAtMs:ms},{merge:true});
+  await setDoc(doc(fbDb,"groups",groupId,"settings","invite"),{expiresAtMs:ms},{merge:true});
+  return ms;
+}
+
 // ── EINLADUNG: Link + Code teilen (Admin & Trainer) ───────────────
-function InviteCard({code,toast}) {
+function InviteCard({code,toast,groupId,expiresAtMs,user}) {
   const [roles,setRoles]=useState(["eltern"]);
+  const [busy,setBusy]=useState(false);
+  const expired=!!expiresAtMs&&Date.now()>expiresAtMs;
+  const [days,setDays]=useState(()=>!expiresAtMs?0:((expiresAtMs-Date.now())/86400000>8?30:7));
   const link=buildInviteLink(code,roles);
+  const fmt=ms=>new Date(ms).toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit",year:"numeric"});
   const copy=(txt,label)=>{ if(navigator.clipboard) navigator.clipboard.writeText(txt).then(()=>toast(label+" kopiert ✓")); else toast("Kopieren nicht möglich","warn"); };
   const share=async()=>{
     if(navigator.share){ try{ await navigator.share({title:"Einladung ins Team",text:"Hier ist dein Einladungslink:",url:link}); }catch(e){} }
     else copy(link,"Link");
   };
+  const changeDays=async d=>{
+    setDays(d); setBusy(true);
+    try{ await setInviteExpiry(groupId,code,d); writeLog(groupId,user,"team",`Einladungscode: Gültigkeit ${d>0?`${d} Tage ab jetzt`:"unbegrenzt"}`,"coach"); toast("Gültigkeit geändert ✓"); }
+    catch(e){ console.warn(e); toast("Änderung nicht möglich – bitte Berechtigung prüfen","err"); }
+    setBusy(false);
+  };
+  const renew=async()=>{
+    if(!window.confirm("Neuen Code erzeugen?\n\nDer bisherige Code und alle bisher verschickten Links funktionieren danach nicht mehr.")) return;
+    setBusy(true);
+    try{ await createInviteCode(groupId,days,user,code); writeLog(groupId,user,"team",`Einladungscode erneuert (${days>0?`${days} Tage gültig`:"unbegrenzt gültig"})`,"coach"); toast("Neuer Code erzeugt ✓"); }
+    catch(e){ console.warn(e); toast("Erneuern nicht möglich – bitte Berechtigung prüfen","err"); }
+    setBusy(false);
+  };
   const btn={padding:"9px 14px",borderRadius:8,border:"none",background:C.primary,color:"white",fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"};
-  return(<div style={{marginBottom:16,padding:"14px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`}}>
+  return(<div style={{marginBottom:16,padding:"14px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${expired?"#fca5a5":C.border}`}}>
     <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:10}}>🔗 Einladung</div>
+    {expired&&<div style={{fontSize:12,fontWeight:700,color:"#b91c1c",background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,padding:"8px 10px",marginBottom:10}}>⛔ Dieser Code ist seit {fmt(expiresAtMs)} abgelaufen. Erzeuge unten einen neuen Code.</div>}
     <div style={{fontSize:12,fontWeight:700,color:C.muted,marginBottom:6}}>Einladen als</div>
     <RolePicker value={roles} onChange={setRoles}/>
     <div style={{marginTop:10,padding:"9px 12px",borderRadius:8,background:C.bg,border:`1.5px solid ${C.border}`,fontSize:12,color:C.text,wordBreak:"break-all"}}>{link}</div>
@@ -4629,27 +4671,40 @@ function InviteCard({code,toast}) {
     </div>
     <div style={{fontSize:12,color:C.muted,marginTop:12}}>Oder Code weitergeben: <b style={{letterSpacing:2,fontSize:14,color:C.text}}>{code}</b> <button onClick={()=>copy(code,"Code")} style={{marginLeft:6,padding:"3px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:C.card,color:C.text,fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>Kopieren</button></div>
     <div style={{fontSize:11,color:C.muted,marginTop:8}}>{roles.includes("trainer")?"Die Trainer-Rolle bestätigt nach der Anmeldung der Admin. Eltern und Spieler treten sofort bei und wählen ihr Kind bzw. Spielerprofil selbst aus.":"Eltern und Spieler treten sofort bei und wählen ihr Kind bzw. Spielerprofil danach selbst aus."}</div>
+    <div style={{marginTop:14,paddingTop:12,borderTop:`1px solid ${C.border}`}}>
+      <div style={{fontSize:12,color:expired?"#b91c1c":C.muted,marginBottom:8}}>{expiresAtMs?(expired?`Abgelaufen seit ${fmt(expiresAtMs)}`:`⏳ Gültig bis ${fmt(expiresAtMs)}`):"♾ Unbegrenzt gültig"}</div>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        <span style={{fontSize:12,fontWeight:700,color:C.text}}>Gültigkeit</span>
+        <select value={days} onChange={e=>changeDays(Number(e.target.value))} disabled={busy} style={{padding:"7px 10px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,color:C.text,background:C.bg,fontFamily:"inherit"}}>
+          {INVITE_DAY_OPTIONS.map(o=><option key={o.d} value={o.d}>{o.l}</option>)}
+        </select>
+        <Btn sm variant="secondary" onClick={renew} disabled={busy}>🔄 Neuen Code erzeugen</Btn>
+      </div>
+      <div style={{fontSize:11,color:C.muted,marginTop:8}}>Die gewählte Gültigkeit zählt ab jetzt. Ein neuer Code macht den bisherigen Code und alle bisher verschickten Links ungültig.</div>
+    </div>
   </div>);
 }
 
 // ── EINLADUNG: Code erzeugen, falls das Team (z. B. ein älteres) noch keinen hat ──
-function InviteCreateCard({groupId,toast}) {
+function InviteCreateCard({groupId,toast,user}) {
   const [busy,setBusy]=useState(false);
+  const [days,setDays]=useState(0);
   const create=async()=>{
     setBusy(true);
-    try{
-      let code="";
-      for(let i=0;i<10;i++){ code=genInviteCode(); if(!(await getDoc(doc(fbDb,"inviteCodes",code))).exists()) break; }
-      await setDoc(doc(fbDb,"inviteCodes",code),{groupId});
-      await setDoc(doc(fbDb,"groups",groupId,"settings","invite"),{code});
-      toast("Einladungscode erzeugt ✓");
-    }catch(e){ console.warn(e); toast("Code konnte nicht erzeugt werden – bitte Berechtigung prüfen","err"); }
+    try{ await createInviteCode(groupId,days,user,null); toast("Einladungscode erzeugt ✓"); }
+    catch(e){ console.warn(e); toast("Code konnte nicht erzeugt werden – bitte Berechtigung prüfen","err"); }
     setBusy(false);
   };
   return(<div style={{marginBottom:16,padding:"14px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`}}>
     <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>🔗 Einladung</div>
     <div style={{fontSize:13,color:C.muted,marginBottom:10}}>Für dieses Team gibt es noch keinen Einladungscode. Mit dem Code entstehen auch die Einladungslinks.</div>
-    <Btn onClick={create} disabled={busy}>{busy?"…":"Einladungscode erzeugen"}</Btn>
+    <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+      <span style={{fontSize:12,fontWeight:700,color:C.text}}>Gültigkeit</span>
+      <select value={days} onChange={e=>setDays(Number(e.target.value))} style={{padding:"7px 10px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,color:C.text,background:C.bg,fontFamily:"inherit"}}>
+        {INVITE_DAY_OPTIONS.map(o=><option key={o.d} value={o.d}>{o.l}</option>)}
+      </select>
+      <Btn onClick={create} disabled={busy}>{busy?"…":"Einladungscode erzeugen"}</Btn>
+    </div>
   </div>);
 }
 
@@ -4679,7 +4734,7 @@ function TeamsCard({user,groupId,memberships,onSwitchGroup,toast,canRename=false
   const doJoin=async()=>{
     if(!code.trim()) return; setBusy(true);
     const r=await joinGroupByCode(user,code.trim(),roles); setBusy(false);
-    if(!r.ok){ toast(r.error==="invalid-code"?"Code ungültig":"Fehler: "+r.error,"err"); return; }
+    if(!r.ok){ toast(joinErrorText(r.error),"err"); return; }
     if(r.pending&&!r.joined&&!r.already){ toast("Beitrittswunsch gesendet – der Admin muss bestätigen"); setModal(null); return; }
     toast(r.already?"Du bist schon in diesem Team":(r.pending?"Beigetreten – die Trainer-Rolle bestätigt noch der Admin":"Team beigetreten ✓")); goto(r.groupId);
   };
@@ -4740,6 +4795,7 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
   const isCoach = role==="admin" || role==="trainer"; // Einladung teilen, Konten mit Spielerprofilen verknüpfen
   const [members,setMembers]=useState([]);
   const [inviteCode,setInviteCode]=useState(null);
+  const [inviteExpiry,setInviteExpiry_]=useState(null);
   const [inviteChecked,setInviteChecked]=useState(false); // true, sobald bekannt ist, ob es schon einen Code gibt
   const [copied,setCopied]=useState(false);
   const [linkFor,setLinkFor]=useState(null); // uid des Mitglieds, dessen Kinder gerade verknüpft werden
@@ -4756,6 +4812,7 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
     if(!fbDb||!groupId||!isCoach){ setInviteCode(null); return; }
     const unsub=onSnapshot(doc(fbDb,"groups",groupId,"settings","invite"),snap=>{
       setInviteCode(snap.exists()?snap.data().code:null);
+      setInviteExpiry_(snap.exists()?(snap.data().expiresAtMs||null):null);
       setInviteChecked(true);
     },()=>setInviteChecked(true));
     return unsub;
@@ -4829,7 +4886,7 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
     {!isCoach&&<div style={{fontSize:13,color:C.muted}}>Nur Trainer und Admins können Mitglieder verwalten und Einladungen verschicken.</div>}
 
     {isCoach&&<>
-      {inviteCode?<InviteCard code={inviteCode} toast={toast}/>:(inviteChecked&&<InviteCreateCard groupId={groupId} toast={toast}/>)}
+      {inviteCode?<InviteCard code={inviteCode} toast={toast} groupId={groupId} expiresAtMs={inviteExpiry} user={firebaseUser}/>:(inviteChecked&&<InviteCreateCard groupId={groupId} toast={toast} user={firebaseUser}/>)}
 
       {joinRequests.length>0&&<div style={{marginBottom:16}}>
         <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>⏳ Offene Beitrittswünsche ({joinRequests.length})</div>
@@ -6170,7 +6227,7 @@ function GroupOnboarding({user, onLogout, toast}) {
     setBusy(true);
     const r=await joinGroupByCode(user,code.trim(),roles);
     setBusy(false);
-    if(!r.ok){ toast(r.error==="invalid-code"?"Code ungültig":"Fehler: "+r.error,"err"); return; }
+    if(!r.ok){ toast(joinErrorText(r.error),"err"); return; }
     if(r.pending&&!r.joined&&!r.already){ setRequestedGroupId(r.groupId); localStorage.setItem("pendingJoinRequest",r.groupId); toast("Beitrittswunsch gesendet ✓"); return; }
     localStorage.setItem("currentGroupId",r.groupId);
     toast(r.pending?"Beigetreten – die Trainer-Rolle bestätigt noch der Admin":"Team beigetreten ✓");
@@ -6442,7 +6499,7 @@ export default function App() {
     localStorage.removeItem("pendingJoin");
     (async()=>{
       const r=await joinGroupByCode(user,p.code,p.roles||p.role||"eltern");
-      if(!r.ok){ toast(r.error==="invalid-code"?"Einladungscode ungültig":"Beitritt fehlgeschlagen: "+r.error,"err"); return; }
+      if(!r.ok){ toast(r.error==="invalid-code"||r.error==="expired-code"?joinErrorText(r.error):"Beitritt fehlgeschlagen: "+r.error,"err"); return; }
       if(r.pending&&!r.joined&&!r.already){
         toast("Beitrittswunsch als Trainer gesendet – der Admin muss noch bestätigen");
         if(memberships.length===0){ localStorage.setItem("pendingJoinRequest",r.groupId); setTimeout(()=>window.location.reload(),800); }
