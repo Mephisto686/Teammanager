@@ -259,13 +259,13 @@ const USER_ROLES = {
 };
 const CAN = {
   // tabs visible
-  start:    ["admin","trainer","eltern"],
+  start:    ["admin","trainer"],
   library:  ["admin","trainer"],
-  team:     ["admin","trainer","eltern"],
-  training: ["admin","trainer","eltern"],
-  calendar: ["admin","trainer","eltern"],
-  teamplaner:["admin","trainer","eltern"],
-  turnier:  ["admin","trainer","eltern"],
+  team:     ["admin","trainer"],
+  training: ["admin","trainer"],
+  calendar: ["admin","trainer"],
+  teamplaner:["admin","trainer"],
+  turnier:  ["admin","trainer"],
   anmeldung:["admin","trainer","eltern"],
   kasse:    ["admin","trainer"],
   orga:     ["admin","trainer"],
@@ -493,7 +493,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.24.0";
+const APP_VERSION = "3.25.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4552,9 +4552,9 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
     <PageHeader title="Einstellungen" sub={`G-Jugend Coach · v${APP_VERSION}`} onlineUsers={onlineUsers} currentUser={firebaseUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
     <GroupManagementPanel groupId={currentGroupId} role={role} memberships={memberships} onSwitchGroup={onSwitchGroup} toast={toast} firebaseUser={firebaseUser} players={players}/>
     {/* Simplified settings for trainer/eltern */}
-    {(role==="trainer"||role==="eltern")&&<SimpleSettings role={role} apiKey={apiKey} onSaveApiKey={onSaveApiKey} prefs={prefs} onPrefChange={onPrefChange} firebaseUser={firebaseUser} onLogout={onLogout}/>}
+    {role==="trainer"&&<SimpleSettings role={role} apiKey={apiKey} onSaveApiKey={onSaveApiKey} prefs={prefs} onPrefChange={onPrefChange} firebaseUser={firebaseUser} onLogout={onLogout}/>}
     {/* Full settings for TRUE global admin only (technischer Betreiber) */}
-    {isGlobalAdmin&&(()=>{
+    {isGlobalAdmin&&role==="admin"&&(()=>{
       const [stab,setStab]=useState("general");
       const stb=(k,l)=><button onClick={()=>setStab(k)} style={{padding:"7px 16px",borderRadius:7,border:"none",cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"inherit",background:stab===k?C.primary:"transparent",color:stab===k?"white":C.muted}}>{l}</button>;
       return(<div>
@@ -4643,6 +4643,68 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
         </div>}
       </div>);
     })()}
+  </div>);
+}
+
+// ── EINSTELLUNGEN FÜR ELTERN (bewusst minimal) ────────────────────
+const FONT_SCALES = [{v:1,l:"Normal"},{v:1.15,l:"Groß"},{v:1.3,l:"Sehr groß"}];
+function ParentSettingsPage({firebaseUser,groupId,myKids,prefs,onPrefChange,onFontScale,onLogout,toast,onlineUsers}) {
+  const [name,setName]=useState(firebaseUser?.displayName||"");
+  const [saving,setSaving]=useState(false);
+  const scale=prefs.fontScale||1;
+  const card={padding:"14px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`};
+  const head={fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:12};
+  const saveName=async()=>{
+    const n=name.trim();
+    if(!n||n===(firebaseUser?.displayName||"")) return;
+    setSaving(true);
+    try{
+      await updateProfile(fbAuth.currentUser,{displayName:n});
+      // Anzeigename auch in Nutzer- und Mitgliedsliste nachziehen (bei fehlender Berechtigung dort nicht schlimm)
+      await Promise.allSettled([
+        setDoc(doc(fbDb,"roles",firebaseUser.uid),{name:n},{merge:true}),
+        groupId?setDoc(doc(fbDb,"groups",groupId,"members",firebaseUser.uid),{name:n},{merge:true}):Promise.resolve(),
+      ]);
+      toast("Name gespeichert");
+    }catch(e){ console.warn(e); toast("Name konnte nicht gespeichert werden","err"); }
+    setSaving(false);
+  };
+  return(<div>
+    <PageHeader title="Einstellungen" sub={`v${APP_VERSION}`} onlineUsers={onlineUsers} currentUser={firebaseUser}/>
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <div style={card}>
+        <div style={head}>👤 Mein Profil</div>
+        <label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6}}>Name</label>
+        <div style={{display:"flex",gap:8}}>
+          <input value={name} onChange={e=>setName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")saveName();}} placeholder="Dein Name"
+            style={{flex:1,minWidth:0,padding:"9px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:14,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit"}}/>
+          <Btn onClick={saveName} disabled={saving||!name.trim()||name.trim()===(firebaseUser?.displayName||"")}>{saving?"…":"Speichern"}</Btn>
+        </div>
+        <div style={{fontSize:12,color:C.muted,marginTop:10}}>E-Mail: {firebaseUser?.email}</div>
+        {myKids.length>0&&<div style={{fontSize:12,color:C.muted,marginTop:4}}>{myKids.length>1?"Verknüpfte Kinder":"Verknüpftes Kind"}: <b style={{color:C.text}}>{myKids.map(k=>k.name).join(", ")}</b></div>}
+      </div>
+
+      <div style={card}>
+        <div style={head}>🎨 Darstellung</div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+          <div>
+            <div style={{fontWeight:600,fontSize:14,color:C.text}}>🌙 Dark Mode</div>
+            <div style={{fontSize:12,color:C.muted}}>Dunkles Design</div>
+          </div>
+          <button onClick={()=>onPrefChange(!(prefs.darkMode||false))} style={{width:48,height:26,borderRadius:13,border:"none",cursor:"pointer",background:prefs.darkMode?C.primary:"#cbd5e1",position:"relative",transition:"background .2s",flexShrink:0}}>
+            <div style={{width:20,height:20,borderRadius:"50%",background:"white",position:"absolute",top:3,left:prefs.darkMode?25:3,transition:"left .2s",boxShadow:"0 1px 3px rgba(0,0,0,.3)"}}/>
+          </button>
+        </div>
+        <div style={{fontWeight:600,fontSize:14,color:C.text,marginBottom:8}}>🔠 Schriftgröße</div>
+        <div style={{display:"flex",gap:8}}>
+          {FONT_SCALES.map(f=><button key={f.v} onClick={()=>onFontScale(f.v)} style={{flex:1,padding:"9px 6px",borderRadius:10,border:`2px solid ${scale===f.v?C.primary:C.border}`,background:scale===f.v?C.accentL:C.card,color:scale===f.v?C.primary:C.muted,fontWeight:800,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>{f.l}</button>)}
+        </div>
+      </div>
+
+      <div style={card}>
+        <button onClick={onLogout} style={{width:"100%",padding:"10px 0",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",color:"#ef4444",fontWeight:700,fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>🔓 Abmelden</button>
+      </div>
+    </div>
   </div>);
 }
 
@@ -4942,7 +5004,7 @@ function Nav({page,setPage,counts}) {
   const allItems=[
     {key:"start",    icon:Home,      label:"Start"},
     {key:"calendar", icon:Clock,     label:"Termine"},
-    {key:"anmeldung",icon:CheckSquare,label:"Anmeldung",alert:counts.role==="eltern"&&counts.openRsvps>0},
+    {key:"anmeldung",icon:CheckSquare,label:counts.role==="eltern"?"Termine":"Anmeldung",alert:counts.role==="eltern"&&counts.openRsvps>0},
     {key:"library",  icon:BookOpen,  label:"Bibliothek", count:counts.exercises},
     {key:"team",     icon:Users,     label:"Team",        count:counts.players},
     {key:"training", icon:CalendarDays,label:"Training",  count:counts.sessions},
@@ -4953,7 +5015,7 @@ function Nav({page,setPage,counts}) {
     {key:"settings", icon:Settings,  label:"Einstellungen",alert:counts.pendingCount>0},
   ];
   const visible=allItems.filter(i=>can(counts.role,i.key)||(i.key==="settings"&&(counts.role==="trainer"||counts.role==="eltern")));
-  const MAIN_KEYS=counts.role==="eltern"?["start","anmeldung","calendar","training"]:["start","calendar","training","teamplaner"];
+  const MAIN_KEYS=counts.role==="eltern"?["anmeldung","settings"]:["start","calendar","training","teamplaner"];
   const mainItems=visible.filter(i=>MAIN_KEYS.includes(i.key));
   const moreItems=visible.filter(i=>!MAIN_KEYS.includes(i.key));
   const moreActive=moreItems.some(i=>i.key===page);
@@ -5074,25 +5136,41 @@ function RsvpPage({role,events,players,rsvps,onSetRsvp,myKids,toast,onlineUsers,
   };
   const moreBtn = hidden>0&&<div style={{textAlign:"center",marginTop:6}}><Btn sm variant="secondary" onClick={()=>setShowAll(true)}>{hidden} weitere Termine anzeigen</Btn></div>;
 
-  // ── Elternansicht: Kind(er) an-/abmelden ──
+  const active = players.filter(p=>p.active!==false).sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+  const stOf=(ev,p)=>rsvps[rsvpKey(ev.key,p.id)]?.status||null;
+
+  // ── Elternansicht: Kind(er) an-/abmelden, andere nur ansehen ──
   if(isParent){
     if(myKids.length===0) return(<div>
-      <PageHeader title="Anmeldung" sub="Zu- und Absagen" onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
+      <PageHeader title="Termine" sub="Zu- und Absagen" onlineUsers={onlineUsers} currentUser={currentUser}/>
       <div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted,lineHeight:1.5}}>
         Dein Profil ist noch mit keinem Kind verknüpft. Bitte den Team-Admin, dich unter <b>Einstellungen → Team-Verwaltung</b> (Button 👶 bei deinem Namen) mit deinem Kind zu verknüpfen.
       </div>
     </div>);
     return(<div>
-      <PageHeader title="Anmeldung" sub={myKids.map(k=>k.name).join(" & ")} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
+      <PageHeader title="Termine" sub={myKids.map(k=>k.name).join(" & ")} onlineUsers={onlineUsers} currentUser={currentUser}/>
       <div style={{fontSize:12,color:C.muted,marginBottom:12}}>Tippe erneut auf deine Auswahl, um sie zurückzunehmen.</div>
       {shown.length===0&&<div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted}}>Aktuell sind keine Termine geplant.</div>}
       {shown.map(ev=>{
         const open=myKids.filter(k=>!rsvps[rsvpKey(ev.key,k.id)]).length;
+        const yesL=active.filter(p=>stOf(ev,p)==="yes"), noL=active.filter(p=>stOf(ev,p)==="no"), openL=active.filter(p=>!stOf(ev,p));
+        const isOpen=openKey===ev.key;
         return(<div key={ev.key} style={{background:C.card,borderRadius:12,border:`1.5px solid ${open>0?"#fde047":C.border}`,padding:"12px 16px",marginBottom:10}}>
           <RsvpEventHead ev={ev}/>
           <div style={{marginTop:6}}>
             {myKids.map(k=><RsvpKidRow key={k.id} kid={k} ev={ev} rsvp={rsvps[rsvpKey(ev.key,k.id)]} onSave={save} showName={myKids.length>1}/>)}
           </div>
+          <div onClick={()=>setOpenKey(isOpen?null:ev.key)} style={{cursor:"pointer",display:"flex",gap:14,fontSize:13,fontWeight:800,marginTop:4,paddingTop:10,borderTop:`1px solid ${C.border}`}}>
+            <span style={{color:"#16a34a"}}>✅ {yesL.length}</span>
+            <span style={{color:"#dc2626"}}>❌ {noL.length}</span>
+            <span style={{color:C.muted}}>⏳ {openL.length}</span>
+            <span style={{marginLeft:"auto",color:C.muted,fontWeight:600,fontSize:12}}>Wer kommt? {isOpen?"▲":"▼"}</span>
+          </div>
+          {isOpen&&<div style={{marginTop:8,fontSize:13,color:C.text,lineHeight:1.6}}>
+            {yesL.length>0&&<div><b style={{color:"#16a34a"}}>Dabei:</b> {yesL.map(p=>p.name).join(", ")}</div>}
+            {noL.length>0&&<div><b style={{color:"#dc2626"}}>Nicht dabei:</b> {noL.map(p=>p.name).join(", ")}</div>}
+            {openL.length>0&&<div><b style={{color:C.muted}}>Noch offen:</b> {openL.map(p=>p.name).join(", ")}</div>}
+          </div>}
         </div>);
       })}
       {moreBtn}
@@ -5100,8 +5178,6 @@ function RsvpPage({role,events,players,rsvps,onSetRsvp,myKids,toast,onlineUsers,
   }
 
   // ── Trainer-/Admin-Ansicht: Übersicht je Termin ──
-  const active = players.filter(p=>p.active!==false).sort((a,b)=>(a.name||"").localeCompare(b.name||""));
-  const stOf=(ev,p)=>rsvps[rsvpKey(ev.key,p.id)]?.status||null;
   return(<div>
     <PageHeader title="Anmeldung" sub={`${shown.length} Termine · ${active.length} aktive Spieler`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
     {shown.length===0&&<div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted}}>Aktuell sind keine Termine geplant.</div>}
@@ -5565,6 +5641,7 @@ export default function App() {
   // Effektive Rolle für Tab-/Aktions-Berechtigungen: globaler Admin ist überall admin,
   // sonst zählt die Rolle innerhalb der aktuell aktiven Gruppe.
   const realRole = isGlobalAdmin ? "admin" : (currentMembership?.role || null);
+  const isCoachReal = realRole==="admin" || realRole==="trainer"; // echte Rechte, unabhängig von der gewählten Ansicht
   // Eigenes Mitgliedsdokument (u.a. verknüpfte Kinder) + wählbare Ansichten
   const myMember = useMyMember(currentGroupId, user);
   const [viewRoleRaw,setViewRoleRaw]=useState(null);
@@ -5585,6 +5662,7 @@ export default function App() {
     prevJoinReqRef.current=groupJoinRequests.length;
   },[groupJoinRequests.length,role]);
   const toggleDark = (val) => { setPrefs({darkMode:val}); setDarkMode(val); applyTheme(val); };
+  const setFontScale = v => setPrefs({fontScale:v});
   // Apply default page from prefs
   useEffect(()=>{ if(prefs.defaultPage&&!sessionStorage.getItem("gjPage")) setPage(prefs.defaultPage); },[prefs.defaultPage]);
   // Redirect if current page not allowed for role
@@ -5593,7 +5671,7 @@ export default function App() {
       // trainer and eltern have access to simplified settings
       const hasAccess=can(role,page)||(page==="settings"&&(role==="trainer"||role==="eltern"));
       if(!hasAccess){
-        const allowed=["start","calendar","library","team","training","teamplaner","turnier","kasse","orga","settings"].find(pg=>can(role,pg)||(pg==="settings"&&(role==="trainer"||role==="eltern")));
+        const allowed=["start","anmeldung","calendar","library","team","training","teamplaner","turnier","kasse","orga","settings"].find(pg=>can(role,pg)||(pg==="settings"&&(role==="trainer"||role==="eltern")));
         if(allowed) setPage(allowed);
       }
     }
@@ -5608,6 +5686,32 @@ export default function App() {
   const [meetings,   setMeetings,   mr]=useCloudStorage("meetings",   [], user, currentGroupId);
   const [recurringSlots,setRecurringSlots,rsr]=useCloudStorage("recurringSlots",[], user, currentGroupId);
   const {rsvps,setRsvp}=useRsvps(currentGroupId,user);
+  // Reduzierte, für Eltern lesbare Daten: nur Name/aktiv der Spieler und die Termine.
+  // Alles Sensible (Stärken, Notizen, Kontakte, Kasse …) bleibt in den Trainer-Dokumenten.
+  const [playersPub]=useCloudStorage("playersPublic",[], user, currentGroupId);
+  const [eventsPub ]=useCloudStorage("eventsPublic", [], user, currentGroupId);
+  // Nur echte Trainer/Admins schreiben die Projektionen (nur bei tatsächlicher Änderung)
+  useEffect(()=>{
+    if(!fbDb||!user||!currentGroupId||!isCoachReal||!pr||!sr||!tr) return;
+    const publish=async(col,items)=>{
+      const key=`pubHash_${currentGroupId}_${col}`;
+      const h=JSON.stringify(items);
+      if(localStorage.getItem(key)===h) return;
+      if(items.length===0&&!localStorage.getItem(key)) return; // frisches Gerät ohne geladene Daten: nichts überschreiben
+      try{
+        await setDoc(doc(fbDb,"groups",currentGroupId,"shared",col),{items,updatedAt:new Date().toISOString()});
+        localStorage.setItem(key,h);
+      }catch(e){ console.warn("publish",col,e); }
+    };
+    publish("playersPublic",players.filter(p=>p.active!==false).map(p=>({id:p.id,name:p.name,active:true})));
+    publish("eventsPublic",buildRsvpEvents(sessions,tournaments));
+  },[players,sessions,tournaments,isCoachReal,currentGroupId,user?.uid,pr,sr,tr]);
+  // Eltern: früher lokal zwischengespeicherte Trainer-Daten von diesem Gerät entfernen
+  useEffect(()=>{
+    if(realRole!=="eltern") return;
+    ["players","coaches","kassenbuch","todos","meetings","exercises","sessions","tournaments","recurringSlots","customCats","teamsets"]
+      .forEach(k=>db.kv.delete("cloud_"+k).catch(()=>{}));
+  },[realRole]);
   const [apiKey,     setApiKey,     ar]=useStorage("apiKey",     "");
   const [lastExportAt,setLastExportAt]=useStorage("lastExportAt","");
   const [customCats, setCustomCats    ]=useCloudStorage("customCats", [], user);
@@ -5638,8 +5742,9 @@ export default function App() {
   const mergeArr=(inc)=>prev=>{ const m=Object.fromEntries(prev.map(e=>[e.id,e]));inc?.forEach(i=>{if(!m[i.id])m[i.id]=i;});return Object.values(m); };
   const upsert=(x)=>prev=>prev.find(e=>e.id===x.id)?prev.map(e=>e.id===x.id?x:e):[...prev,x];
   // Anmeldung: Termine, eigene Kinder, offene Antworten (nächste 6 Wochen)
-  const rsvpEvents=buildRsvpEvents(sessions,tournaments);
-  const myKids=(myMember?.childIds||[]).map(id=>players.find(p=>p.id===id)).filter(p=>p&&p.active!==false);
+  const rsvpPlayers=isCoachReal?players:(playersPub||[]);
+  const rsvpEvents=isCoachReal?buildRsvpEvents(sessions,tournaments):(eventsPub||[]).filter(e=>e.date>=todayISO());
+  const myKids=(myMember?.childIds||[]).map(id=>rsvpPlayers.find(p=>p.id===id)).filter(p=>p&&p.active!==false);
   const rsvpHorizon=addDaysISO(todayISO(),RSVP_HORIZON_DAYS);
   const openRsvps=rsvpEvents.filter(ev=>ev.date<=rsvpHorizon).reduce((n,ev)=>n+myKids.filter(k=>!rsvps[rsvpKey(ev.key,k.id)]).length,0);
 
@@ -5697,7 +5802,7 @@ export default function App() {
     <style>{`*{box-sizing:border-box}body{margin:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}`}</style>
     <Toasts/>
     <Nav page={page} setPage={setPage} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0,openRsvps}}/>
-    <main className="gm" style={{display:"block"}}>
+    <main className="gm" style={{display:"block",zoom:prefs.fontScale||1}}>
       {page==="start"    &&<StartPage players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} todos={todos} meetings={meetings} teamsets={teamsets} kassenbuch={kassenbuch} exercises={exercises} role={role} openRsvps={openRsvps} currentUser={user} onlineUsers={onlineUsers} onNavigate={setPage} onOpenLibraryCategory={cat=>{setPendingLibraryCat(cat);setPage("library");}} onOpenOrgaItem={target=>{setPendingOrgaTarget(target);setPage("orga");}} onOpenCalendarItem={target=>{setPendingCalendarTarget(target);setPage("calendar");}} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} onSaveExercise={saveEx} onDeleteExercise={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="library"  &&<LibraryPage  exercises={exercises} onSave={saveEx} onDelete={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} apiKey={apiKey} toast={toast} onlineUsers={onlineUsers} currentUser={user} initialCategory={pendingLibraryCat} onConsumeInitialCategory={()=>setPendingLibraryCat(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="team"     &&<TeamPage     players={players} coaches={coaches} sessions={sessions} onSaveSession={saveSe} onSavePlayer={can(role,"editAnything")?savePl:null} onDeletePlayer={can(role,"editAnything")?id=>{const i=players.find(p=>p.id===id);setPlayers(prev=>prev.filter(p=>p.id!==id));showUndo("Spieler",i,()=>setPlayers(prev=>[i,...prev]));}:null} onSaveCoach={can(role,"editAnything")?saveCo:null} onDeleteCoach={can(role,"editAnything")?id=>{const i=coaches.find(c=>c.id===id);setCoaches(prev=>prev.filter(c=>c.id!==id));showUndo("Trainer",i,()=>setCoaches(prev=>[i,...prev]));}:null} toast={toast} showStrength={can(role,"seeStrength")} readOnly={!can(role,"editAnything")} onAddToTraining={can(role,"editAnything")?({playerIds,coachIds,kids,coachCount})=>{setPendingSetup({playerIds,coachIds,kids:kids||playerIds.length,coachCount:coachCount||1,date:todayISO(),location:"outdoor",focus:""});setPage("training");}:null} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
@@ -5706,9 +5811,10 @@ export default function App() {
       {page==="training" &&<TrainingPage sessions={sessions} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} apiKey={apiKey} toast={toast} onSaveExercise={saveEx} pendingSetup={pendingSetup} onClearPendingSetup={()=>setPendingSetup(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} onGoToCalendar={()=>setPage("calendar")} recurringSlots={recurringSlots} onSaveSlot={saveSlot} onDeleteSlot={id=>{const i=recurringSlots.find(s=>s.id===id);setRecurringSlots(prev=>prev.filter(s=>s.id!==id));showUndo("Serientermin",i,()=>setRecurringSlots(prev=>[i,...prev]));}} onGenerateSessions={generateSessions}/>}
       {page==="turnier"  &&<TurnierPage  tournaments={tournaments} onSaveTournament={saveTo} onDeleteTournament={id=>{const i=tournaments.find(t=>t.id===id);setTournaments(prev=>prev.filter(t=>t.id!==id));showUndo("Turnier",i,()=>setTournaments(prev=>[i,...prev]));}} coaches={coaches} players={players} onSavePlayer={can(role,"editAnything")?savePl:null} onlineUsers={onlineUsers} currentUser={user} toast={toast} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} initialOpenId={pendingTurnierId} onClearInitialOpen={()=>setPendingTurnierId(null)}/>}
       {page==="calendar" &&<CalendarPage sessions={sessions} meetings={meetings} tournaments={tournaments} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} onSaveMeeting={saveMeeting} onDeleteMeeting={id=>{const i=meetings.find(m=>m.id===id);setMeetings(prev=>prev.filter(m=>m.id!==id));showUndo("Trainertreff",i,()=>setMeetings(prev=>[i,...prev]));}} onSaveTournament={saveTo} onSaveExercise={saveEx} apiKey={apiKey} toast={toast} readOnly={!can(role,"editAnything")} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} pendingTarget={pendingCalendarTarget} onClearPendingTarget={()=>setPendingCalendarTarget(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
-      {page==="anmeldung"&&can(role,"anmeldung")&&<RsvpPage role={role} events={rsvpEvents} players={players} rsvps={rsvps} onSetRsvp={setRsvp} myKids={myKids} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="anmeldung"&&can(role,"anmeldung")&&<RsvpPage role={role} events={rsvpEvents} players={rsvpPlayers} rsvps={rsvps} onSetRsvp={setRsvp} myKids={myKids} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="kasse"    &&can(role,"kasse")&&<KassePage kassenbuch={kassenbuch} onSave={can(role,"editKasse")?saveKa:null} onDelete={can(role,"editKasse")?id=>{const i=kassenbuch.find(k=>k.id===id);setKassenbuch(prev=>prev.filter(k=>k.id!==id));showUndo("Eintrag",i,()=>setKassenbuch(prev=>[i,...prev]));}:null} readOnly={!can(role,"editKasse")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
-      {(can(role,"settings")||role==="trainer"||role==="eltern")&&page==="settings"&&<SettingsPage exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={setCurrentGroupId} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="settings"&&role==="eltern"&&<ParentSettingsPage firebaseUser={user} groupId={currentGroupId} myKids={myKids} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onLogout={logout} toast={toast} onlineUsers={onlineUsers}/>}
+      {(can(role,"settings")||role==="trainer")&&page==="settings"&&<SettingsPage key={role} exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={setCurrentGroupId} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
     </main>
     {undoBuf&&<div style={{position:"fixed",bottom:76,left:12,right:12,zIndex:9999,display:"flex",alignItems:"center",gap:10,background:"#1e293b",color:"white",borderRadius:12,padding:"12px 16px",boxShadow:"0 4px 24px rgba(0,0,0,.35)"}}>
       <span style={{fontSize:13,fontWeight:600,flex:1}}>{undoBuf.label}</span>
