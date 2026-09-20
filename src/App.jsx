@@ -734,7 +734,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.43.0";
+const APP_VERSION = "3.43.1";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -2042,7 +2042,7 @@ function TeamPage({members=[],teamsetCount=0,onOpenTeamsets,players,coaches,sess
               <div style={{fontWeight:800,fontSize:14,color:C.text}}>{m.name||<span style={{color:C.muted,fontStyle:"italic",fontWeight:600}}>Kein Name angegeben</span>}</div>
               {m.email&&<div style={{fontSize:12,marginTop:1,wordBreak:"break-all"}}><a href={`mailto:${m.email}`} style={{color:C.primary,textDecoration:"none"}}>{m.email}</a></div>}
               <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:6}}>
-                {m.kids.length>0?m.kids.map(k=><span key={k.id} style={{fontSize:11,fontWeight:700,padding:"2px 9px",borderRadius:20,background:C.accentL,color:C.primary}}>👶 {k.name}</span>):<span style={{fontSize:11,color:C.muted,fontStyle:"italic"}}>Kein Kind verknüpft</span>}
+                {m.kids.length>0?m.kids.map(k=><span key={k.id} style={{fontSize:11,fontWeight:700,padding:"2px 9px",borderRadius:20,background:C.accentL,color:C.primary}}>🧒 {k.name}</span>):<span style={{fontSize:11,color:C.muted,fontStyle:"italic"}}>Kein Kind verknüpft</span>}
               </div>
             </div>
           </div>)}
@@ -4813,6 +4813,16 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
   const [inviteChecked,setInviteChecked]=useState(false); // true, sobald bekannt ist, ob es schon einen Code gibt
   const [copied,setCopied]=useState(false);
   const [linkFor,setLinkFor]=useState(null); // uid des Mitglieds, dessen Kinder gerade verknüpft werden
+  const [nameEdit,setNameEdit]=useState(null); // {uid,email,value}: Admin ändert den Anzeigenamen eines Mitglieds
+    const saveMemberName=async()=>{
+      const n=(nameEdit?.value||"").trim().slice(0,60); if(!n) return;
+      try{
+        await setDoc(doc(fbDb,"groups",groupId,"members",nameEdit.uid),{name:n},{merge:true});
+        setDoc(doc(fbDb,"roles",nameEdit.uid),{name:n},{merge:true}).catch(()=>{}); // Nutzerliste (nur globale Admins dürfen dort schreiben)
+        writeLog(groupId,firebaseUser,"team",`Name gesetzt: ${nameEdit.email||nameEdit.uid} → „${n}"`,"coach");
+        toast("Name gespeichert ✓"); setNameEdit(null);
+      }catch(e){ console.warn(e); toast("Speichern nicht möglich","err"); }
+    };
 
   useEffect(()=>{
     if(!fbDb||!groupId) return;
@@ -4926,7 +4936,7 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
             return(<div key={m.uid} style={{display:"flex",alignItems:"center",flexWrap:"wrap",gap:10,padding:"10px 14px",borderRadius:10,background:C.card,border:`1.5px solid ${C.border}`}}>
               {m.photo?<img src={m.photo} width={32} height={32} style={{borderRadius:"50%",flexShrink:0}}/>:<div style={{width:32,height:32,borderRadius:"50%",background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,color:C.primary,flexShrink:0}}>{(m.name||m.email||"?")[0].toUpperCase()}</div>}
               <div style={{flex:1,minWidth:0}}>
-                <div style={{fontWeight:700,fontSize:13,color:C.text}}>{m.name||<span style={{color:C.muted,fontStyle:"italic",fontWeight:600}}>Kein Name angegeben</span>}{isSelf&&<span style={{fontSize:11,color:C.muted}}> (du)</span>}</div>
+                <div style={{fontWeight:700,fontSize:13,color:C.text}}>{m.name||<span style={{color:C.muted,fontStyle:"italic",fontWeight:600}}>Kein Name angegeben</span>}{isSelf&&<span style={{fontSize:11,color:C.muted}}> (du)</span>}{canManage&&<button title="Namen ändern" onClick={()=>setNameEdit({uid:m.uid,email:m.email,value:m.name||""})} style={{marginLeft:6,padding:"0 4px",border:"none",background:"none",cursor:"pointer",fontSize:13,lineHeight:1}}>✏️</button>}</div>
                 <div style={{fontSize:11,color:C.muted,marginTop:1,wordBreak:"break-all"}}>{m.email}</div>
                 {mr.some(isFamily)&&!(m.childIds||[]).length&&<div style={{fontSize:11,color:"#b45309",marginTop:2}}>⚠ noch nicht mit {mr.includes("spieler")&&!mr.includes("eltern")?"einem Spielerprofil":"einem Kind"} verknüpft</div>}
               </div>
@@ -4939,7 +4949,7 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
                     style={{padding:"4px 10px",borderRadius:20,border:`1.5px solid ${on?rr.color:C.border}`,background:on?rr.bg:C.card,color:on?rr.color:C.muted,fontWeight:700,fontSize:12,cursor:dis?"default":"pointer",opacity:dis&&!on?.5:1,fontFamily:"inherit"}}>{rr.emoji} {rr.label}</button>;
                 })}
               </div>}
-              {<button title={mr.includes("spieler")&&!mr.includes("eltern")?"Spielerprofil verknüpfen":"Kinder verknüpfen"} onClick={()=>setLinkFor(m.uid)} style={{padding:"5px 8px",borderRadius:8,border:`1.5px solid ${C.border}`,background:(m.childIds||[]).length?C.accentL:C.card,cursor:"pointer",color:C.text,fontSize:12,fontWeight:700,flexShrink:0,fontFamily:"inherit"}}>{mr.includes("spieler")&&!mr.includes("eltern")?"⚽":"👶"} {(m.childIds||[]).length||"+"}</button>}
+              {<button title={mr.includes("spieler")&&!mr.includes("eltern")?"Spielerprofil verknüpfen":"Kinder verknüpfen"} onClick={()=>setLinkFor(m.uid)} style={{padding:"5px 8px",borderRadius:8,border:`1.5px solid ${C.border}`,background:(m.childIds||[]).length?C.accentL:C.card,cursor:"pointer",color:C.text,fontSize:12,fontWeight:700,flexShrink:0,fontFamily:"inherit"}}>{mr.includes("spieler")&&!mr.includes("eltern")?"⚽":"🧒"} {(m.childIds||[]).length||"+"}</button>}
               {!isSelf&&canManage&&<button title="Aus Team entfernen" onClick={()=>{if(window.confirm(`${m.name||m.email} aus dem Team entfernen?`)){deleteDoc(doc(fbDb,"groups",groupId,"members",m.uid));writeLog(groupId,firebaseUser,"team",`${m.name||m.email} aus dem Team entfernt`,"coach");}}} style={{padding:"5px 8px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",cursor:"pointer",color:"#ef4444",fontSize:12,flexShrink:0}}>🗑</button>}
             </div>);
           })}
@@ -4947,7 +4957,44 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
       </div>
     </>}
     {linkModal}
+    {nameEdit&&<Modal title="Name ändern" onClose={()=>setNameEdit(null)}>
+      <div style={{fontSize:12,color:C.muted,marginBottom:8,wordBreak:"break-all"}}>{nameEdit.email}</div>
+      <input autoFocus value={nameEdit.value} onChange={e=>setNameEdit(x=>({...x,value:e.target.value}))} onKeyDown={e=>{if(e.key==="Enter")saveMemberName();}} placeholder="Anzeigename" maxLength={60}
+        style={{width:"100%",padding:"10px 14px",border:`1.5px solid ${C.border}`,borderRadius:10,fontSize:15,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
+        <Btn variant="secondary" onClick={()=>setNameEdit(null)}>Abbrechen</Btn>
+        <Btn onClick={saveMemberName} disabled={!nameEdit.value.trim()}>Speichern</Btn>
+      </div>
+    </Modal>}
   </div>);
+}
+
+// Nutzer ohne Namen (z. B. Konto vor Einführung der Namen angelegt oder Registrierung ohne Namen): einmal nachfragen
+function NamePrompt({user,groupId,toast,onSkip}) {
+  const [n,setN]=useState("");
+  const [busy,setBusy]=useState(false);
+  const save=async()=>{
+    const name=n.trim().slice(0,60); if(!name) return;
+    setBusy(true);
+    try{
+      await updateProfile(fbAuth.currentUser,{displayName:name});
+      await Promise.allSettled([
+        setDoc(doc(fbDb,"roles",user.uid),{name},{merge:true}),
+        groupId?setDoc(doc(fbDb,"groups",groupId,"members",user.uid),{name},{merge:true}):Promise.resolve(),
+      ]);
+      toast("Name gespeichert ✓");
+    }catch(e){ console.warn(e); toast("Name konnte nicht gespeichert werden","err"); }
+    setBusy(false);
+  };
+  return(<Modal title="Wie heißt du?" onClose={onSkip}>
+    <div style={{fontSize:13,color:C.muted,marginBottom:12}}>Für dein Konto ist noch kein Name hinterlegt. Trainer und Admins sehen ihn in der Mitgliederliste – so wissen sie, wer du bist.</div>
+    <input autoFocus value={n} onChange={e=>setN(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")save();}} placeholder="Vor- und Nachname" maxLength={60}
+      style={{width:"100%",padding:"10px 14px",border:`1.5px solid ${C.border}`,borderRadius:10,fontSize:15,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit",boxSizing:"border-box"}}/>
+    <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
+      <Btn variant="secondary" onClick={onSkip}>Später</Btn>
+      <Btn onClick={save} disabled={busy||!n.trim()}>{busy?"…":"Speichern"}</Btn>
+    </div>
+  </Modal>);
 }
 
 // ── DATENRETTUNG: lokal auf diesem Gerät gespeicherte Übungen/Aufstellungen finden und übernehmen ──
@@ -5826,8 +5873,8 @@ function ParentStartPage({role,currentUser,events,players=[],myKids,rsvps,eventM
     </div>
     {kid&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
       {myKids.length>1
-        ?myKids.map(k=>{const on=k.id===kid.id;return <button key={k.id} onClick={()=>pickKid(k.id)} style={{padding:"6px 14px",borderRadius:20,border:`2px solid ${on?C.primary:C.border}`,background:on?C.accentL:C.card,color:on?C.primary:C.muted,fontWeight:800,fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>{role==="spieler"?"⚽":"👶"} {k.name}</button>;})
-        :<span style={{padding:"6px 14px",borderRadius:20,border:`2px solid ${C.primary}`,background:C.accentL,color:C.primary,fontWeight:800,fontSize:14}}>{role==="spieler"?"⚽":"👶"} {kid.name}</span>}
+        ?myKids.map(k=>{const on=k.id===kid.id;return <button key={k.id} onClick={()=>pickKid(k.id)} style={{padding:"6px 14px",borderRadius:20,border:`2px solid ${on?C.primary:C.border}`,background:on?C.accentL:C.card,color:on?C.primary:C.muted,fontWeight:800,fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>{role==="spieler"?"⚽":"🧒"} {k.name}</button>;})
+        :<span style={{padding:"6px 14px",borderRadius:20,border:`2px solid ${C.primary}`,background:C.accentL,color:C.primary,fontWeight:800,fontSize:14}}>{role==="spieler"?"⚽":"🧒"} {kid.name}</span>}
     </div>}
     {next.length===0&&<div style={{...box,fontSize:14,color:C.muted}}>Aktuell sind keine Termine geplant.</div>}
     {next.map(ev=>{
@@ -6589,6 +6636,7 @@ export default function App() {
   const myRoles = memberSrc ? memberRoles(memberSrc) : (isGlobalAdmin ? ["admin"] : []);
   const realRole = memberSrc ? primaryRole(myRoles) : (isGlobalAdmin ? "admin" : null);
   const isCoachReal = realRole==="admin" || realRole==="trainer"; // echte Rechte, unabhängig von der gewählten Ansicht
+  const [nameSkipped,setNameSkipped]=useState(()=>{try{return sessionStorage.getItem("nameSkipped")==="1";}catch(e){return false;}});
   // Alle Mitglieder des Teams (für Trainer- und Kontakte-Liste)
   const [teamMembers,setTeamMembers]=useState([]);
   useEffect(()=>{
@@ -6831,6 +6879,7 @@ export default function App() {
   return(<RoleSwitchCtx.Provider value={{views:roleViews,viewRole:role,realRole,setViewRole,teams:(memberships||[]).map(m=>({id:m.groupId,name:allGroups.find(g=>g.id===m.groupId)?.name||m.groupId,role:m.role,roles:memberRoles(m)})),currentTeamId:currentGroupId,switchTeam:switchGroup,manageTeams:()=>setPage("settings"),logout}}><div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:C.bg,minHeight:"100vh"}}>
     <style>{`*{box-sizing:border-box}body{margin:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}`}</style>
     <Toasts/>
+    {!!user&&!!myMember&&!user.displayName&&!myMember.name&&!nameSkipped&&<NamePrompt user={user} groupId={currentGroupId} toast={toast} onSkip={()=>{try{sessionStorage.setItem("nameSkipped","1");}catch(e){} setNameSkipped(true);}}/>}
     <Nav page={page} setPage={setPage} onLogout={logout} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0,openRsvps}}/>
     <main className="gm" style={{display:"block",zoom:prefs.fontScale||1}}>
       {needsChildSetup?<ChildSetupPage role={role} players={rsvpPlayers} groupId={currentGroupId} toast={toast} onSkip={()=>{try{localStorage.setItem(`childSkip_${user.uid}_${currentGroupId}`,"1");}catch(e){} setChildSkip(true);}}/>:<>
