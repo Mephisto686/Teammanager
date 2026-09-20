@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import Dexie from "dexie";
 import { initializeApp } from "firebase/app";
 import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile, sendPasswordResetEmail } from "firebase/auth";
-import { getFirestore, doc, getDoc, setDoc, onSnapshot, deleteDoc, collection, addDoc, query, orderBy, limit, getDocs, serverTimestamp } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc, onSnapshot, deleteDoc, collection, addDoc, query, orderBy, limit, getDocs, serverTimestamp, where } from "firebase/firestore";
 import { Home, ArrowLeft, Menu, X, BookOpen, Users, CalendarDays, Settings, Plus, Search, Edit2, Trash2, Download, Upload, Shuffle, Filter, Clock, Trophy, Bot, RefreshCw, CheckSquare, Square, Dices, ListChecks, Wallet, Phone, MapPin, AlertTriangle, ShieldCheck, ClipboardList, Star } from "lucide-react";
 
 // ── DEXIE DB ──────────────────────────────────────────────────────
@@ -266,6 +266,7 @@ const CAN = {
   calendar: ["admin","trainer","eltern"],
   teamplaner:["admin","trainer","eltern"],
   turnier:  ["admin","trainer","eltern"],
+  anmeldung:["admin","trainer","eltern"],
   kasse:    ["admin","trainer"],
   orga:     ["admin","trainer"],
   settings: ["admin"],
@@ -389,6 +390,84 @@ function usePersonalSettings(userId) {
 
   return [prefs, setPrefs];
 }
+// ── ROLLENWECHSEL (Header) ────────────────────────────────────────
+// Stellt die tatsächliche und die angezeigte Rolle bereit. Admin darf zwischen
+// Admin/Trainer/Eltern wechseln, Trainer mit verknüpftem Kind zwischen Trainer/Eltern.
+// Rein Ansicht: die echten Zugriffsrechte (Firestore Rules) ändern sich dadurch nicht.
+const RoleSwitchCtx = React.createContext(null);
+function RoleSwitcher() {
+  const ctx = React.useContext(RoleSwitchCtx);
+  const [open,setOpen] = useState(false);
+  if(!ctx || !ctx.views || ctx.views.length<2) return null;
+  const cur = USER_ROLES[ctx.viewRole] || USER_ROLES.eltern;
+  return(<div style={{position:"relative",flexShrink:0}}>
+    <button onClick={()=>setOpen(o=>!o)} title="Ansicht wechseln" style={{display:"flex",alignItems:"center",gap:4,padding:"5px 10px",borderRadius:20,border:`1.5px solid ${cur.color}`,background:cur.bg,color:cur.color,fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}}>{cur.emoji} {cur.label} ▾</button>
+    {open&&<>
+      <div style={{position:"fixed",inset:0,zIndex:9990}} onClick={()=>setOpen(false)}/>
+      <div style={{position:"absolute",top:36,right:0,background:C.card,border:`1px solid ${C.border}`,borderRadius:12,boxShadow:"0 4px 20px rgba(0,0,0,.18)",padding:"6px",minWidth:170,zIndex:9991}}>
+        <div style={{fontSize:10,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,padding:"4px 8px 6px"}}>Ansicht wechseln</div>
+        {ctx.views.map(v=>{
+          const r=USER_ROLES[v]; const active=v===ctx.viewRole;
+          return(<button key={v} onClick={()=>{ctx.setViewRole(v);setOpen(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"9px 10px",borderRadius:8,border:"none",background:active?r.bg:"transparent",color:active?r.color:C.text,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit",textAlign:"left"}}>
+            <span>{r.emoji}</span><span style={{flex:1}}>{r.label}</span>{active&&<span>✓</span>}
+          </button>);
+        })}
+      </div>
+    </>}
+  </div>);
+}
+
+// ── ANMELDUNG: Daten & Hooks ──────────────────────────────────────
+// Verknüpfte Kinder stehen im Mitgliedsdokument: groups/{gid}/members/{uid}.childIds
+// Zu-/Absagen: ein Dokument pro Termin+Kind: groups/{gid}/rsvps/{terminKey}__{spielerId}
+const RSVP_HORIZON_DAYS = 42;
+const rsvpKey = (eventKey, playerId) => eventKey + "__" + playerId;
+
+// Eigenes Mitgliedsdokument (live)
+function useMyMember(groupId, user) {
+  const [member,setMember] = useState(null);
+  useEffect(()=>{
+    if(!fbDb || !groupId || !user){ setMember(null); return; }
+    const unsub = onSnapshot(doc(fbDb,"groups",groupId,"members",user.uid), snap=>{
+      setMember(snap.exists()?snap.data():null);
+    }, ()=>setMember(null));
+    return unsub;
+  },[groupId,user?.uid]);
+  return member;
+}
+
+// Alle Zu-/Absagen ab heute (live)
+function useRsvps(groupId, user) {
+  const [rsvps,setRsvps] = useState({});
+  useEffect(()=>{
+    if(!fbDb || !groupId || !user){ setRsvps({}); return; }
+    const q = query(collection(fbDb,"groups",groupId,"rsvps"), where("date",">=",todayISO()));
+    const unsub = onSnapshot(q, snap=>{
+      const m={}; snap.docs.forEach(d=>{ m[d.id]=d.data(); }); setRsvps(m);
+    }, e=>console.warn("rsvps",e));
+    return unsub;
+  },[groupId,user?.uid]);
+  // status: "yes" | "no" | null (= Antwort zurücknehmen)
+  const setRsvp = async (ev, playerId, status, note="") => {
+    const ref = doc(fbDb,"groups",groupId,"rsvps",rsvpKey(ev.key,playerId));
+    if(!status){ await deleteDoc(ref); return; }
+    await setDoc(ref,{
+      eventKey:ev.key, eventType:ev.type, date:ev.date, playerId, status, note:note||"",
+      by:user.uid, byName:user.displayName||user.email||"", at:new Date().toISOString()
+    });
+  };
+  return {rsvps,setRsvp};
+}
+
+// Termine, zu denen man zu-/absagen kann: Trainings (ohne Entwürfe) und Turniere ab heute
+function buildRsvpEvents(sessions, tournaments) {
+  const today = todayISO();
+  return [
+    ...(sessions||[]).filter(s=>s.date>=today&&!s.isDraft).map(s=>({key:"tr-"+s.id,type:"training",date:s.date,time:s.time||"",title:"Training",location:s.location||""})),
+    ...(tournaments||[]).filter(t=>t.date>=today).map(t=>({key:"tn-"+t.id,type:"turnier",date:t.date,time:t.hosting==="other"?"":(t.startTime||""),title:t.name||"Turnier",location:t.location||""})),
+  ].sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));
+}
+
 // ── PRESENCE ──────────────────────────────────────────────────────
 async function setPresence(user, online) {
   if(!fbDb||!user) return;
@@ -414,7 +493,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.23.0";
+const APP_VERSION = "3.24.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4336,11 +4415,12 @@ function UserNameEditor({u,isSelf,setUserName}) {
 }
 
 // ── TEAM-VERWALTUNG (pro Gruppe) ───────────────────────────────────
-function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast, firebaseUser}) {
+function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast, firebaseUser, players=[]}) {
   const canManage = role==="admin"; // effektive Rolle berücksichtigt globalen Admin schon
   const [members,setMembers]=useState([]);
   const [inviteCode,setInviteCode]=useState(null);
   const [copied,setCopied]=useState(false);
+  const [linkFor,setLinkFor]=useState(null); // uid des Mitglieds, dessen Kinder gerade verknüpft werden
 
   useEffect(()=>{
     if(!fbDb||!groupId) return;
@@ -4357,6 +4437,30 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
     return unsub;
   },[groupId,canManage]);
   const joinRequests=useJoinRequests(groupId, canManage);
+  const linkMember=linkFor?members.find(x=>x.uid===linkFor):null;
+  const toggleChild=(m,pid)=>{
+    const ids=m.childIds||[];
+    setDoc(doc(fbDb,"groups",groupId,"members",m.uid),{childIds:ids.includes(pid)?ids.filter(x=>x!==pid):[...ids,pid]},{merge:true})
+      .catch(()=>toast("Verknüpfung konnte nicht gespeichert werden","warn"));
+  };
+  const linkModal=linkMember&&(()=>{
+    const em=(linkMember.email||"").trim().toLowerCase();
+    const suggested=p=>em&&(p.contacts||[]).some(c=>(c.email||"").trim().toLowerCase()===em);
+    const list=[...players].sort((a,b)=>(b.active!==false)-(a.active!==false)||(a.name||"").localeCompare(b.name||""));
+    return(<Modal title={`Kinder von ${linkMember.name||linkMember.email}`} onClose={()=>setLinkFor(null)}>
+      <div style={{fontSize:13,color:C.muted,marginBottom:12}}>Verknüpfte Kinder kann dieses Mitglied in der Elternansicht an- und abmelden.</div>
+      {list.length===0&&<div style={{fontSize:13,color:C.muted}}>Noch keine Spieler angelegt.</div>}
+      {list.map(p=>{
+        const on=(linkMember.childIds||[]).includes(p.id);
+        return(<label key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 4px",borderBottom:`1px solid ${C.border}`,cursor:"pointer"}}>
+          <input type="checkbox" checked={on} onChange={()=>toggleChild(linkMember,p.id)} style={{width:18,height:18}}/>
+          <span style={{flex:1,fontSize:14,fontWeight:700,color:C.text}}>{p.name}{p.active===false&&<span style={{fontSize:11,color:C.muted,fontWeight:400}}> (inaktiv)</span>}</span>
+          {suggested(p)&&<span style={{fontSize:11,color:"#16a34a",fontWeight:700}}>✉️ passt zur E-Mail</span>}
+        </label>);
+      })}
+      <div style={{display:"flex",justifyContent:"flex-end",marginTop:16}}><Btn onClick={()=>setLinkFor(null)}>Fertig</Btn></div>
+    </Modal>);
+  })();
 
   const copyCode=()=>{
     if(!inviteCode) return;
@@ -4419,12 +4523,14 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
                 <option value="trainer">🧑‍🏫 Trainer</option>
                 <option value="eltern">👪 Eltern</option>
               </select>
+              <button title="Kinder verknüpfen" onClick={()=>setLinkFor(m.uid)} style={{padding:"5px 8px",borderRadius:8,border:`1.5px solid ${C.border}`,background:(m.childIds||[]).length?C.accentL:C.card,cursor:"pointer",color:C.text,fontSize:12,fontWeight:700,flexShrink:0,fontFamily:"inherit"}}>👶 {(m.childIds||[]).length||"+"}</button>
               {!isSelf&&<button title="Aus Team entfernen" onClick={()=>{if(window.confirm(`${m.name||m.email} aus dem Team entfernen?`))deleteDoc(doc(fbDb,"groups",groupId,"members",m.uid));}} style={{padding:"5px 8px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",cursor:"pointer",color:"#ef4444",fontSize:12,flexShrink:0}}>🗑</button>}
             </div>);
           })}
         </div>
       </div>
     </>}
+    {linkModal}
   </div>);
 }
 
@@ -4444,7 +4550,7 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
   const Sec=({title,ch})=><div style={{marginBottom:28}}><h2 style={{fontSize:16,fontWeight:800,color:C.text,marginBottom:14,paddingBottom:8,borderBottom:`2px solid ${C.accentL}`}}>{title}</h2>{ch}</div>;
   return(<div>
     <PageHeader title="Einstellungen" sub={`G-Jugend Coach · v${APP_VERSION}`} onlineUsers={onlineUsers} currentUser={firebaseUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
-    <GroupManagementPanel groupId={currentGroupId} role={role} memberships={memberships} onSwitchGroup={onSwitchGroup} toast={toast} firebaseUser={firebaseUser}/>
+    <GroupManagementPanel groupId={currentGroupId} role={role} memberships={memberships} onSwitchGroup={onSwitchGroup} toast={toast} firebaseUser={firebaseUser} players={players}/>
     {/* Simplified settings for trainer/eltern */}
     {(role==="trainer"||role==="eltern")&&<SimpleSettings role={role} apiKey={apiKey} onSaveApiKey={onSaveApiKey} prefs={prefs} onPrefChange={onPrefChange} firebaseUser={firebaseUser} onLogout={onLogout}/>}
     {/* Full settings for TRUE global admin only (technischer Betreiber) */}
@@ -4709,7 +4815,7 @@ function StatBox({icon,value,label}) {
   </div>);
 }
 
-function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets,kassenbuch,exercises,role,currentUser,onlineUsers,onNavigate,onOpenLibraryCategory,onOpenOrgaItem,onOpenCalendarItem,onOpenTournament,onSaveExercise,onDeleteExercise,onGoBack}) {
+function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets,kassenbuch,exercises,role,openRsvps,currentUser,onlineUsers,onNavigate,onOpenLibraryCategory,onOpenOrgaItem,onOpenCalendarItem,onOpenTournament,onSaveExercise,onDeleteExercise,onGoBack}) {
   const [exModal,setExModal]=useState(null);
   const today=todayISO();
   const activePlayers=(players||[]).filter(p=>p.active);
@@ -4729,6 +4835,7 @@ function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets
   ].sort((a,b)=>a.date.localeCompare(b.date)).slice(0,10);
 
   const teasers=[
+    can(role,"anmeldung")&&{icon:"✅",title:"Anmeldung",sub:role==="eltern"?(openRsvps>0?`${openRsvps} offen`:"Alles beantwortet"):"Zu-/Absagen",badge:role==="eltern"&&openRsvps>0?openRsvps:null,onClick:()=>onNavigate("anmeldung")},
     can(role,"calendar")&&{icon:"🗓",title:"Termine",sub:"Alle Termine",onClick:()=>onNavigate("calendar")},
     can(role,"training")&&{icon:"📅",title:"Neues Training",sub:nextSession?relDateLabel(nextSession.date):"Neue Einheit",onClick:()=>onNavigate("training")},
     {icon:"👥",title:"Team",sub:`${activePlayers.length} Spieler`,onClick:()=>onNavigate("team")},
@@ -4752,6 +4859,7 @@ function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets
         <div style={{fontSize:13,color:C.muted,fontWeight:600}}>{greeting}{firstName?`, ${firstName}`:""}</div>
         <h1 style={{margin:"2px 0 0",fontSize:24,fontWeight:900,color:C.text}}>⚽ Übersicht</h1>
       </div>
+      <div style={{marginLeft:"auto",flexShrink:0}}><RoleSwitcher/></div>
     </div>
 
     <div className="tm-hscroll" style={{display:"flex",gap:10,overflowX:"auto",marginBottom:24,paddingBottom:2}}>
@@ -4834,6 +4942,7 @@ function Nav({page,setPage,counts}) {
   const allItems=[
     {key:"start",    icon:Home,      label:"Start"},
     {key:"calendar", icon:Clock,     label:"Termine"},
+    {key:"anmeldung",icon:CheckSquare,label:"Anmeldung",alert:counts.role==="eltern"&&counts.openRsvps>0},
     {key:"library",  icon:BookOpen,  label:"Bibliothek", count:counts.exercises},
     {key:"team",     icon:Users,     label:"Team",        count:counts.players},
     {key:"training", icon:CalendarDays,label:"Training",  count:counts.sessions},
@@ -4844,7 +4953,7 @@ function Nav({page,setPage,counts}) {
     {key:"settings", icon:Settings,  label:"Einstellungen",alert:counts.pendingCount>0},
   ];
   const visible=allItems.filter(i=>can(counts.role,i.key)||(i.key==="settings"&&(counts.role==="trainer"||counts.role==="eltern")));
-  const MAIN_KEYS=["start","calendar","training","teamplaner"];
+  const MAIN_KEYS=counts.role==="eltern"?["start","anmeldung","calendar","training"]:["start","calendar","training","teamplaner"];
   const mainItems=visible.filter(i=>MAIN_KEYS.includes(i.key));
   const moreItems=visible.filter(i=>!MAIN_KEYS.includes(i.key));
   const moreActive=moreItems.some(i=>i.key===page);
@@ -4852,7 +4961,7 @@ function Nav({page,setPage,counts}) {
 
   // Gruppierung für das Hamburger-Menü (volle Übersicht aller Bereiche)
   const MENU_GROUPS=[
-    {label:null,        keys:["start","calendar"]},
+    {label:null,        keys:["start","calendar","anmeldung"]},
     {label:"Training",  keys:["library","training","teamplaner"]},
     {label:"Mannschaft",keys:["team","turnier"]},
     {label:"Verwaltung",keys:["kasse","orga"]},
@@ -4922,6 +5031,107 @@ function Nav({page,setPage,counts}) {
       <div style={{padding:"10px 18px",borderTop:`1px solid ${C.border}`,fontSize:10,color:C.muted,flexShrink:0}}>v{APP_VERSION}</div>
     </div>
   </>);
+}
+
+// ── ANMELDUNG: Seite ──────────────────────────────────────────────
+function RsvpEventHead({ev}) {
+  return(<div style={{display:"flex",alignItems:"center",gap:10}}>
+    <div style={{width:40,height:40,borderRadius:10,background:ev.type==="training"?"#eff6ff":"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{ev.type==="training"?"📅":"🏆"}</div>
+    <div style={{flex:1,minWidth:0}}>
+      <div style={{fontWeight:800,fontSize:14,color:C.text}}>{fmtDate(ev.date)}{ev.time?` · ${ev.time} Uhr`:""}</div>
+      <div style={{fontSize:12,color:C.muted,marginTop:2}}>{ev.type==="training"?"Training":ev.title}{ev.location?` · 📍 ${ev.location}`:""}</div>
+    </div>
+  </div>);
+}
+
+function RsvpKidRow({kid,ev,rsvp,onSave,compact,showName=true}) {
+  const st = rsvp?.status || null;
+  const btn=(val,label,col,bg)=>(
+    <button onClick={()=>onSave(ev,kid.id,st===val?null:val,val==="no"?(rsvp?.note||""):"")} style={{flex:1,padding:compact?"6px 8px":"10px 8px",borderRadius:10,border:`2px solid ${st===val?col:C.border}`,background:st===val?bg:C.card,color:st===val?col:C.muted,fontWeight:800,fontSize:compact?12:14,cursor:"pointer",fontFamily:"inherit"}}>{label}</button>
+  );
+  return(<div style={{padding:compact?"8px 0":"10px 0"}}>
+    {showName&&<div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:6}}>{kid.name}</div>}
+    <div style={{display:"flex",gap:8}}>
+      {btn("yes","✅ Dabei","#16a34a","#dcfce7")}
+      {btn("no","❌ Nicht dabei","#dc2626","#fee2e2")}
+    </div>
+    {st==="no"&&<input key={rsvp?.note||""} defaultValue={rsvp?.note||""} placeholder="Grund (optional, z. B. krank)"
+      onBlur={e=>{const v=e.target.value.trim();if(v!==(rsvp?.note||""))onSave(ev,kid.id,"no",v);}}
+      style={{width:"100%",marginTop:8,padding:"8px 10px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit"}}/>}
+  </div>);
+}
+
+function RsvpPage({role,events,players,rsvps,onSetRsvp,myKids,toast,onlineUsers,currentUser,onGoHome,onGoBack}) {
+  const isParent = role==="eltern";
+  const [showAll,setShowAll] = useState(false);
+  const [openKey,setOpenKey] = useState(null);
+  const horizon = addDaysISO(todayISO(),RSVP_HORIZON_DAYS);
+  const shown = showAll ? events : events.filter(e=>e.date<=horizon);
+  const hidden = events.length - shown.length;
+  const save = async (ev,pid,status,note)=>{
+    try{ await onSetRsvp(ev,pid,status,note); }
+    catch(e){ console.warn("rsvp",e); toast("Speichern nicht möglich – bitte Berechtigung prüfen","warn"); }
+  };
+  const moreBtn = hidden>0&&<div style={{textAlign:"center",marginTop:6}}><Btn sm variant="secondary" onClick={()=>setShowAll(true)}>{hidden} weitere Termine anzeigen</Btn></div>;
+
+  // ── Elternansicht: Kind(er) an-/abmelden ──
+  if(isParent){
+    if(myKids.length===0) return(<div>
+      <PageHeader title="Anmeldung" sub="Zu- und Absagen" onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
+      <div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted,lineHeight:1.5}}>
+        Dein Profil ist noch mit keinem Kind verknüpft. Bitte den Team-Admin, dich unter <b>Einstellungen → Team-Verwaltung</b> (Button 👶 bei deinem Namen) mit deinem Kind zu verknüpfen.
+      </div>
+    </div>);
+    return(<div>
+      <PageHeader title="Anmeldung" sub={myKids.map(k=>k.name).join(" & ")} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
+      <div style={{fontSize:12,color:C.muted,marginBottom:12}}>Tippe erneut auf deine Auswahl, um sie zurückzunehmen.</div>
+      {shown.length===0&&<div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted}}>Aktuell sind keine Termine geplant.</div>}
+      {shown.map(ev=>{
+        const open=myKids.filter(k=>!rsvps[rsvpKey(ev.key,k.id)]).length;
+        return(<div key={ev.key} style={{background:C.card,borderRadius:12,border:`1.5px solid ${open>0?"#fde047":C.border}`,padding:"12px 16px",marginBottom:10}}>
+          <RsvpEventHead ev={ev}/>
+          <div style={{marginTop:6}}>
+            {myKids.map(k=><RsvpKidRow key={k.id} kid={k} ev={ev} rsvp={rsvps[rsvpKey(ev.key,k.id)]} onSave={save} showName={myKids.length>1}/>)}
+          </div>
+        </div>);
+      })}
+      {moreBtn}
+    </div>);
+  }
+
+  // ── Trainer-/Admin-Ansicht: Übersicht je Termin ──
+  const active = players.filter(p=>p.active!==false).sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+  const stOf=(ev,p)=>rsvps[rsvpKey(ev.key,p.id)]?.status||null;
+  return(<div>
+    <PageHeader title="Anmeldung" sub={`${shown.length} Termine · ${active.length} aktive Spieler`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
+    {shown.length===0&&<div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted}}>Aktuell sind keine Termine geplant.</div>}
+    {shown.map(ev=>{
+      const yes=active.filter(p=>stOf(ev,p)==="yes"), no=active.filter(p=>stOf(ev,p)==="no"), openL=active.filter(p=>!stOf(ev,p));
+      const isOpen=openKey===ev.key;
+      const group=(label,list)=>list.length>0&&<div style={{marginTop:10}}>
+        <div style={{fontSize:11,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6}}>{label} ({list.length})</div>
+        {list.map(p=><RsvpKidRow key={p.id} kid={p} ev={ev} rsvp={rsvps[rsvpKey(ev.key,p.id)]} onSave={save} compact/>)}
+      </div>;
+      return(<div key={ev.key} style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"12px 16px",marginBottom:10}}>
+        <div onClick={()=>setOpenKey(isOpen?null:ev.key)} style={{cursor:"pointer"}}>
+          <RsvpEventHead ev={ev}/>
+          <div style={{display:"flex",gap:14,fontSize:13,fontWeight:800,marginTop:8}}>
+            <span style={{color:"#16a34a"}}>✅ {yes.length}</span>
+            <span style={{color:"#dc2626"}}>❌ {no.length}</span>
+            <span style={{color:C.muted}}>⏳ {openL.length}</span>
+            <span style={{marginLeft:"auto",color:C.muted,fontWeight:600}}>{isOpen?"▲":"▼"}</span>
+          </div>
+          {!isOpen&&no.some(p=>rsvps[rsvpKey(ev.key,p.id)]?.note)&&<div style={{fontSize:12,color:C.muted,marginTop:6}}>{no.filter(p=>rsvps[rsvpKey(ev.key,p.id)]?.note).map(p=>`${p.name}: ${rsvps[rsvpKey(ev.key,p.id)].note}`).join(" · ")}</div>}
+        </div>
+        {isOpen&&<div>
+          {group("❌ Absagen",no)}
+          {group("⏳ Keine Antwort",openL)}
+          {group("✅ Zusagen",yes)}
+        </div>}
+      </div>);
+    })}
+    {moreBtn}
+  </div>);
 }
 
 // ── APP ───────────────────────────────────────────────────────────
@@ -5045,7 +5255,8 @@ function PageHeader({title, sub, onlineUsers, currentUser, onGoHome, onGoBack}) 
           {sub&&<div style={{fontSize:13,color:C.muted,marginTop:2}}>{sub}</div>}
         </div>
       </div>
-      {users.length>0&&<div style={{position:"relative",flexShrink:0,marginLeft:12}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0,marginLeft:12}}><RoleSwitcher/>
+      {users.length>0&&<div style={{position:"relative",flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer"}} onClick={()=>setShowList(s=>!s)}>
           <div style={{display:"flex"}}>
             {users.map((u,i)=>(
@@ -5072,6 +5283,7 @@ function PageHeader({title, sub, onlineUsers, currentUser, onGoHome, onGoBack}) 
           </div>
         </>}
       </div>}
+      </div>
     </div>
   );
 }
@@ -5352,7 +5564,16 @@ export default function App() {
   const currentMembership = memberships?.find(m=>m.groupId===currentGroupId);
   // Effektive Rolle für Tab-/Aktions-Berechtigungen: globaler Admin ist überall admin,
   // sonst zählt die Rolle innerhalb der aktuell aktiven Gruppe.
-  const role = isGlobalAdmin ? "admin" : (currentMembership?.role || null);
+  const realRole = isGlobalAdmin ? "admin" : (currentMembership?.role || null);
+  // Eigenes Mitgliedsdokument (u.a. verknüpfte Kinder) + wählbare Ansichten
+  const myMember = useMyMember(currentGroupId, user);
+  const [viewRoleRaw,setViewRoleRaw]=useState(null);
+  useEffect(()=>{ if(user?.uid) setViewRoleRaw(localStorage.getItem("viewRole_"+user.uid)||null); },[user?.uid]);
+  const hasChildLink = (myMember?.childIds||[]).length>0;
+  const roleViews = realRole==="admin" ? ["admin","trainer","eltern"] : (realRole==="trainer"&&hasChildLink) ? ["trainer","eltern"] : [];
+  // Effektive Rolle = gewählte Ansicht (nur wenn erlaubt), sonst die echte Rolle
+  const role = roleViews.includes(viewRoleRaw) ? viewRoleRaw : realRole;
+  const setViewRole = v => { setViewRoleRaw(v); if(user?.uid) localStorage.setItem("viewRole_"+user.uid,v); };
   const [prefs, setPrefs] = usePersonalSettings(user?.uid);
   // Offene Beitrittswünsche der aktuellen Gruppe (nur relevant für den Gruppen-Admin)
   const groupJoinRequests = useJoinRequests(currentGroupId, role==="admin");
@@ -5386,6 +5607,7 @@ export default function App() {
   const [todos,      setTodos,      tor]=useCloudStorage("todos",      [], user, currentGroupId);
   const [meetings,   setMeetings,   mr]=useCloudStorage("meetings",   [], user, currentGroupId);
   const [recurringSlots,setRecurringSlots,rsr]=useCloudStorage("recurringSlots",[], user, currentGroupId);
+  const {rsvps,setRsvp}=useRsvps(currentGroupId,user);
   const [apiKey,     setApiKey,     ar]=useStorage("apiKey",     "");
   const [lastExportAt,setLastExportAt]=useStorage("lastExportAt","");
   const [customCats, setCustomCats    ]=useCloudStorage("customCats", [], user);
@@ -5415,6 +5637,11 @@ export default function App() {
   // Functional update helpers - prevent stale closure bugs
   const mergeArr=(inc)=>prev=>{ const m=Object.fromEntries(prev.map(e=>[e.id,e]));inc?.forEach(i=>{if(!m[i.id])m[i.id]=i;});return Object.values(m); };
   const upsert=(x)=>prev=>prev.find(e=>e.id===x.id)?prev.map(e=>e.id===x.id?x:e):[...prev,x];
+  // Anmeldung: Termine, eigene Kinder, offene Antworten (nächste 6 Wochen)
+  const rsvpEvents=buildRsvpEvents(sessions,tournaments);
+  const myKids=(myMember?.childIds||[]).map(id=>players.find(p=>p.id===id)).filter(p=>p&&p.active!==false);
+  const rsvpHorizon=addDaysISO(todayISO(),RSVP_HORIZON_DAYS);
+  const openRsvps=rsvpEvents.filter(ev=>ev.date<=rsvpHorizon).reduce((n,ev)=>n+myKids.filter(k=>!rsvps[rsvpKey(ev.key,k.id)]).length,0);
 
   const saveEx=x=>{ setExercises(upsert(x));logActivity(user,"exercise_saved",x.title||"");toast('Übung gespeichert'); };
   const savePl=x=>{ setPlayers(upsert(x));logActivity(user,"player_saved",x.name||"");toast('Spieler gespeichert'); };
@@ -5466,12 +5693,12 @@ export default function App() {
   // In keiner Gruppe? → Onboarding (Team anlegen oder beitreten). Jeder eingeloggte Nutzer landet hier,
   // niemand wird mehr global blockiert.
   if(memberships.length===0||!currentGroupId) return <GroupOnboarding user={user} onLogout={logout} toast={toast}/>;
-  return(<div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:C.bg,minHeight:"100vh"}}>
+  return(<RoleSwitchCtx.Provider value={{views:roleViews,viewRole:role,realRole,setViewRole}}><div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:C.bg,minHeight:"100vh"}}>
     <style>{`*{box-sizing:border-box}body{margin:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}`}</style>
     <Toasts/>
-    <Nav page={page} setPage={setPage} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0}}/>
+    <Nav page={page} setPage={setPage} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0,openRsvps}}/>
     <main className="gm" style={{display:"block"}}>
-      {page==="start"    &&<StartPage players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} todos={todos} meetings={meetings} teamsets={teamsets} kassenbuch={kassenbuch} exercises={exercises} role={role} currentUser={user} onlineUsers={onlineUsers} onNavigate={setPage} onOpenLibraryCategory={cat=>{setPendingLibraryCat(cat);setPage("library");}} onOpenOrgaItem={target=>{setPendingOrgaTarget(target);setPage("orga");}} onOpenCalendarItem={target=>{setPendingCalendarTarget(target);setPage("calendar");}} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} onSaveExercise={saveEx} onDeleteExercise={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="start"    &&<StartPage players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} todos={todos} meetings={meetings} teamsets={teamsets} kassenbuch={kassenbuch} exercises={exercises} role={role} openRsvps={openRsvps} currentUser={user} onlineUsers={onlineUsers} onNavigate={setPage} onOpenLibraryCategory={cat=>{setPendingLibraryCat(cat);setPage("library");}} onOpenOrgaItem={target=>{setPendingOrgaTarget(target);setPage("orga");}} onOpenCalendarItem={target=>{setPendingCalendarTarget(target);setPage("calendar");}} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} onSaveExercise={saveEx} onDeleteExercise={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="library"  &&<LibraryPage  exercises={exercises} onSave={saveEx} onDelete={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} apiKey={apiKey} toast={toast} onlineUsers={onlineUsers} currentUser={user} initialCategory={pendingLibraryCat} onConsumeInitialCategory={()=>setPendingLibraryCat(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="team"     &&<TeamPage     players={players} coaches={coaches} sessions={sessions} onSaveSession={saveSe} onSavePlayer={can(role,"editAnything")?savePl:null} onDeletePlayer={can(role,"editAnything")?id=>{const i=players.find(p=>p.id===id);setPlayers(prev=>prev.filter(p=>p.id!==id));showUndo("Spieler",i,()=>setPlayers(prev=>[i,...prev]));}:null} onSaveCoach={can(role,"editAnything")?saveCo:null} onDeleteCoach={can(role,"editAnything")?id=>{const i=coaches.find(c=>c.id===id);setCoaches(prev=>prev.filter(c=>c.id!==id));showUndo("Trainer",i,()=>setCoaches(prev=>[i,...prev]));}:null} toast={toast} showStrength={can(role,"seeStrength")} readOnly={!can(role,"editAnything")} onAddToTraining={can(role,"editAnything")?({playerIds,coachIds,kids,coachCount})=>{setPendingSetup({playerIds,coachIds,kids:kids||playerIds.length,coachCount:coachCount||1,date:todayISO(),location:"outdoor",focus:""});setPage("training");}:null} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="orga"&&can(role,"orga")&&<OrgaPage todos={todos} onSaveTodo={saveTodo} onDeleteTodo={id=>{const i=todos.find(t=>t.id===id);setTodos(prev=>prev.filter(t=>t.id!==id));showUndo("Task",i,()=>setTodos(prev=>[i,...prev]));}} coaches={coaches} currentUser={user} toast={toast} showUndo={showUndo} readOnly={!can(role,"editAnything")} onlineUsers={onlineUsers} pendingTarget={pendingOrgaTarget} onClearPendingTarget={()=>setPendingOrgaTarget(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
@@ -5479,6 +5706,7 @@ export default function App() {
       {page==="training" &&<TrainingPage sessions={sessions} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} apiKey={apiKey} toast={toast} onSaveExercise={saveEx} pendingSetup={pendingSetup} onClearPendingSetup={()=>setPendingSetup(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} onGoToCalendar={()=>setPage("calendar")} recurringSlots={recurringSlots} onSaveSlot={saveSlot} onDeleteSlot={id=>{const i=recurringSlots.find(s=>s.id===id);setRecurringSlots(prev=>prev.filter(s=>s.id!==id));showUndo("Serientermin",i,()=>setRecurringSlots(prev=>[i,...prev]));}} onGenerateSessions={generateSessions}/>}
       {page==="turnier"  &&<TurnierPage  tournaments={tournaments} onSaveTournament={saveTo} onDeleteTournament={id=>{const i=tournaments.find(t=>t.id===id);setTournaments(prev=>prev.filter(t=>t.id!==id));showUndo("Turnier",i,()=>setTournaments(prev=>[i,...prev]));}} coaches={coaches} players={players} onSavePlayer={can(role,"editAnything")?savePl:null} onlineUsers={onlineUsers} currentUser={user} toast={toast} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} initialOpenId={pendingTurnierId} onClearInitialOpen={()=>setPendingTurnierId(null)}/>}
       {page==="calendar" &&<CalendarPage sessions={sessions} meetings={meetings} tournaments={tournaments} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} onSaveMeeting={saveMeeting} onDeleteMeeting={id=>{const i=meetings.find(m=>m.id===id);setMeetings(prev=>prev.filter(m=>m.id!==id));showUndo("Trainertreff",i,()=>setMeetings(prev=>[i,...prev]));}} onSaveTournament={saveTo} onSaveExercise={saveEx} apiKey={apiKey} toast={toast} readOnly={!can(role,"editAnything")} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} pendingTarget={pendingCalendarTarget} onClearPendingTarget={()=>setPendingCalendarTarget(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="anmeldung"&&can(role,"anmeldung")&&<RsvpPage role={role} events={rsvpEvents} players={players} rsvps={rsvps} onSetRsvp={setRsvp} myKids={myKids} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="kasse"    &&can(role,"kasse")&&<KassePage kassenbuch={kassenbuch} onSave={can(role,"editKasse")?saveKa:null} onDelete={can(role,"editKasse")?id=>{const i=kassenbuch.find(k=>k.id===id);setKassenbuch(prev=>prev.filter(k=>k.id!==id));showUndo("Eintrag",i,()=>setKassenbuch(prev=>[i,...prev]));}:null} readOnly={!can(role,"editKasse")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {(can(role,"settings")||role==="trainer"||role==="eltern")&&page==="settings"&&<SettingsPage exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={setCurrentGroupId} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
     </main>
@@ -5487,5 +5715,5 @@ export default function App() {
       <button onClick={undoBuf.restore} style={{background:"#3b82f6",color:"white",border:"none",borderRadius:8,padding:"6px 14px",fontSize:13,fontWeight:800,cursor:"pointer",whiteSpace:"nowrap"}}>↩ Rückgängig</button>
       <button onClick={()=>{clearTimeout(undoBuf.t);setUndoBuf(null);}} style={{background:"none",border:"none",color:"#94a3b8",cursor:"pointer",fontSize:18,lineHeight:1,padding:"0 2px"}}>✕</button>
     </div>}
-  </div>);
+  </div></RoleSwitchCtx.Provider>);
 }
