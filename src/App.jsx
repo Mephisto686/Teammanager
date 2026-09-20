@@ -734,7 +734,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.41.0";
+const APP_VERSION = "3.42.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4919,7 +4919,47 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
   </div>);
 }
 
-function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch,onImport,toast,apiKey,onSaveApiKey,customCats,onSaveCustomCats,firebaseUser,onLogout,onFullBackup,role,isGlobalAdmin,allUsers,setUserRole,setUserName,deleteUser,prefs={},onPrefChange,onFontScale,onlineUsers,currentGroupId,memberships,onSwitchGroup,onCreatePlayer,onGoHome,onGoBack}) {
+// ── DATENRETTUNG: lokal auf diesem Gerät gespeicherte Übungen/Aufstellungen finden und übernehmen ──
+function RescueCard({currentGroupId,exercisesCount,onRestore,toast}) {
+  const [res,setRes]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const scan=async()=>{
+    setBusy(true);
+    try{
+      const all=await db.kv.toArray(); const found=[];
+      for(const r of all){
+        const k=String(r.key||"");
+        const col=/exercise/i.test(k)?"exercises":/teamset/i.test(k)?"teamsets":null;
+        if(!col) continue;
+        let arr=null; try{ const v=JSON.parse(r.value); if(Array.isArray(v)) arr=v; }catch(e){}
+        if(!arr) continue;
+        found.push({key:k,col,items:arr,kb:Math.round((r.value||"").length/1024),bak:k.startsWith("bak_"),current:k===cloudCacheKey(currentGroupId,col)});
+      }
+      setRes({found,total:all.length});
+    }catch(e){ console.warn(e); toast("Lokaler Speicher nicht lesbar","err"); }
+    setBusy(false);
+  };
+  const noun=c=>c==="exercises"?"Übungen":"Aufstellungen";
+  const restore=row=>{ const n=onRestore(row.col,row.items); toast(n>0?`${n} ${noun(row.col)} übernommen ✓`:"Nichts Neues – alles schon vorhanden"); };
+  const btn={padding:"6px 10px",borderRadius:8,border:`1px solid ${C.border}`,background:C.card,color:C.text,fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit"};
+  return(<div>
+    <div style={{fontSize:13,color:C.muted,marginBottom:10}}>Prüft, ob auf <b>diesem Gerät</b> noch Übungen oder Aufstellungen im lokalen Speicher liegen – auch aus älteren Versionen oder als automatische Sicherheitskopie – und übernimmt sie ins aktuelle Team. Aktuell im Team: {exercisesCount} Übungen.</div>
+    <Btn onClick={scan} disabled={busy}>{busy?"Prüfe …":"🔍 Lokalen Speicher prüfen"}</Btn>
+    {res&&<div style={{marginTop:12,display:"flex",flexDirection:"column",gap:8}}>
+      {res.found.length===0&&<div style={{fontSize:13,color:"#b45309",background:"#fffbeb",border:"1px solid #fde68a",borderRadius:8,padding:"10px 12px"}}>Auf diesem Gerät ist nichts (mehr) gespeichert ({res.total} lokale Einträge insgesamt). Prüfe andere Geräte oder die alte Adresse der App.</div>}
+      {res.found.map(r=><div key={r.key} style={{border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 12px",background:C.bg}}>
+        <div style={{fontWeight:800,fontSize:13,color:C.text}}>{r.items.length===0?"leer":`${r.items.length} ${noun(r.col)}`} <span style={{fontWeight:600,color:C.muted,fontSize:11}}>· {r.kb} KB</span></div>
+        <div style={{fontSize:11,color:C.muted,margin:"2px 0 8px",wordBreak:"break-all"}}>{r.bak?"🛟 Sicherheitskopie":r.current?"aktuell verwendeter Speicher":"älterer Speicher"} · {r.key}</div>
+        {r.items.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          <button onClick={()=>restore(r)} style={{...btn,background:C.primary,color:"white",border:"none"}}>In dieses Team übernehmen</button>
+          {r.col==="exercises"&&<button onClick={()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"exercises",exercises:r.items},`Teammanager_Uebungen_lokal_${r.items.length}-Eintraege_${todayISO()}.json`,toast)} style={btn}>Als Datei speichern</button>}
+        </div>}
+      </div>)}
+    </div>}
+  </div>);
+}
+
+function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch,onImport,toast,apiKey,onSaveApiKey,customCats,onSaveCustomCats,firebaseUser,onLogout,onFullBackup,role,isGlobalAdmin,allUsers,setUserRole,setUserName,deleteUser,prefs={},onPrefChange,onFontScale,onlineUsers,currentGroupId,memberships,onSwitchGroup,onCreatePlayer,onRestoreLocal,onGoHome,onGoBack}) {
   const ref=useRef();const [mode,setMode]=useState("merge");const [ki,setKi]=useState(apiKey||"");const [kv,setKv]=useState(false);
   const doImport=async e=>{ const f=e.target.files?.[0];if(!f)return;try{if(f.name.endsWith(".csv")){const p=parseCsvPlayers(await readText(f));onImport({players:p},mode==="replace"?"replace_players":"merge_players");toast(`${p.length} Spieler importiert`);}else{const d=JSON.parse(await readText(f));
     const t=d.type||"unknown";
@@ -5005,6 +5045,7 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
       <div style={{display:"flex",gap:8}}><input type={kv?"text":"password"} value={ki} onChange={e=>setKi(e.target.value)} placeholder="sk-ant-..." style={{flex:1,padding:"9px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:14,outline:"none",fontFamily:"monospace"}}/><Btn sm variant="secondary" onClick={()=>setKv(v=>!v)}>{kv?"🙈":"👁️"}</Btn><Btn sm onClick={()=>{onSaveApiKey(ki.trim());toast(ki.trim()?"API-Key gespeichert":"API-Key entfernt");}}>Speichern</Btn></div>
       {apiKey&&<div style={{marginTop:8,fontSize:12,color:"#16a34a",fontWeight:600}}>✅ API-Key aktiv – KI-Funktionen verfügbar</div>}
     </div>}/>
+    <Sec title="🛟 Datenrettung" ch={<RescueCard currentGroupId={currentGroupId} exercisesCount={exercises.length} onRestore={onRestoreLocal} toast={toast}/>}/>
     <Sec title="📤 Exportieren" ch={<div style={{display:"flex",flexDirection:"column",gap:10}}>
       <EC icon="💾" title="Vollständiges Backup" desc="Alle Daten inkl. Turniere & Kasse" sub={`${exercises.length} Übungen · ${players.length} Spieler · ${sessions.length} Trainings · ${tournaments.length} Turniere · ${kassenbuch.length} Kassenbucheinträge`} fn={onFullBackup}/>
       <EC icon="📚" title="Nur Übungen" desc="Übungen teilen" sub={`${exercises.length} Übungen`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"exercises",exercises},`Teammanager_Uebungen_${exercises.length}-Eintraege_${todayISO()}.json`,toast)}/>
@@ -6089,7 +6130,13 @@ function useCloudStorage(key, def, user, groupId=DEFAULT_GROUP_ID) {
         if (mine !== seq) return; // neuerer Stand ist schon unterwegs
       }
       patch(b => ({...b, data:items, fromCloud:true}));
-      db.kv.put({ key: localKey, value: JSON.stringify(items) }).catch(() => {});
+      const json = JSON.stringify(items);
+      // Sicherheitsnetz: Ersetzt der Cloud-Stand einen größeren lokalen Bestand, bleibt eine Kopie unter "bak_…" (siehe Einstellungen → Datenrettung)
+      db.kv.get(localKey).then(row => {
+        if(row?.value && row.value!==json){
+          try{ const old=JSON.parse(row.value); if(Array.isArray(old) && old.length>(Array.isArray(items)?items.length:0)) return db.kv.put({ key:"bak_"+localKey, value:row.value }); }catch(e){}
+        }
+      }).catch(() => {}).finally(() => { db.kv.put({ key: localKey, value: json }).catch(() => {}); });
     }, e => console.warn("onSnapshot", key, e));
     return unsub;
   }, [user, groupId, key, localKey]); // eslint-disable-line
@@ -6534,10 +6581,11 @@ export default function App() {
     publish("playersPublic",players.filter(p=>p.active!==false).map(p=>({id:p.id,name:p.name,active:true})));
     publish("eventsPublic",buildRsvpEvents(sessions,tournaments));
   },[players,sessions,tournaments,isCoachReal,currentGroupId,user?.uid,pr,sr,tr]);
-  // Eltern: früher lokal zwischengespeicherte Trainer-Daten von diesem Gerät entfernen
+  // Eltern: früher lokal zwischengespeicherte Trainer-Daten von diesem Gerät entfernen.
+  // Die Übungen bleiben bewusst unangetastet: sie sind nicht personenbezogen und lagen früher teils nur lokal (unersetzlich).
   useEffect(()=>{
     if(!isFamily(realRole)) return;
-    ["players","coaches","kassenbuch","todos","meetings","exercises","sessions","tournaments","recurringSlots","customCats","teamsets"]
+    ["players","coaches","kassenbuch","todos","meetings","sessions","tournaments","recurringSlots","customCats","teamsets"]
       .forEach(k=>db.kv.delete(cloudCacheKey(currentGroupId,k)).catch(()=>{}));
   },[realRole,currentGroupId]);
   const [apiKey,     setApiKey,     ar]=useStorage("apiKey",     "");
@@ -6586,6 +6634,14 @@ export default function App() {
       setTimeout(()=>window.location.reload(),600);
     })();
   },[user,memberships]);
+  // Lokal gefundene Übungen/Aufstellungen ins aktuelle Team übernehmen (nur neue, nach ID) – Rückgabe: Anzahl neu übernommener Einträge
+  const restoreLocal=(col,items)=>{
+    const before=col==="exercises"?exercises:teamsets;
+    const have=new Set(before.map(x=>x&&x.id));
+    const add=items.filter(x=>x&&x.id!==undefined&&!have.has(x.id));
+    if(add.length){ const merge=prev=>{const h=new Set((prev||[]).map(x=>x&&x.id));return [...(prev||[]),...add.filter(x=>!h.has(x.id))];}; if(col==="exercises") setExercises(merge); else if(col==="teamsets") setTeamsets(merge); }
+    return add.length;
+  };
   const doFullBackup=async()=>{await dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"full",exercises,players,coaches,sessions,tournaments,kassenbuch,teamsets,customCats,recurringSlots},`Teammanager_Backup_alle-Daten_${todayISO()}.json`,toast);setLastExportAt(new Date().toISOString());};
   const [undoBuf,setUndoBuf]=useState(null);
   function showUndo(label,item,restoreFn){
@@ -6679,7 +6735,7 @@ export default function App() {
       {page==="log"&&can(role,"log")&&<ActivityPage entries={activity} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="kasse"    &&can(role,"kasse")&&<KassePage kassenbuch={kassenbuch} onSave={can(role,"editKasse")?saveKa:null} onDelete={can(role,"editKasse")?id=>{const i=kassenbuch.find(k=>k.id===id);setKassenbuch(prev=>prev.filter(k=>k.id!==id));showUndo("Eintrag",i,()=>setKassenbuch(prev=>[i,...prev]));}:null} readOnly={!can(role,"editKasse")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="settings"&&isFamily(role)&&<ParentSettingsPage role={role} players={rsvpPlayers} memberships={memberships} onSwitchGroup={switchGroup} firebaseUser={user} groupId={currentGroupId} myKids={myKids} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onLogout={logout} toast={toast} onlineUsers={onlineUsers}/>}
-      {(can(role,"settings")||role==="trainer")&&page==="settings"&&<SettingsPage key={role} onCreatePlayer={createPlayerProfile} exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={switchGroup} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {(can(role,"settings")||role==="trainer")&&page==="settings"&&<SettingsPage key={role} onRestoreLocal={restoreLocal} onCreatePlayer={createPlayerProfile} exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={switchGroup} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
     </>}
     </main>
     {undoBuf&&<div style={{position:"fixed",bottom:76,left:12,right:12,zIndex:9999,display:"flex",alignItems:"center",gap:10,background:"#1e293b",color:"white",borderRadius:12,padding:"12px 16px",boxShadow:"0 4px 24px rgba(0,0,0,.35)"}}>
