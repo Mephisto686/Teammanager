@@ -743,7 +743,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.37.0";
+const APP_VERSION = "3.37.1";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4632,6 +4632,27 @@ function InviteCard({code,toast}) {
   </div>);
 }
 
+// ── EINLADUNG: Code erzeugen, falls das Team (z. B. ein älteres) noch keinen hat ──
+function InviteCreateCard({groupId,toast}) {
+  const [busy,setBusy]=useState(false);
+  const create=async()=>{
+    setBusy(true);
+    try{
+      let code="";
+      for(let i=0;i<10;i++){ code=genInviteCode(); if(!(await getDoc(doc(fbDb,"inviteCodes",code))).exists()) break; }
+      await setDoc(doc(fbDb,"inviteCodes",code),{groupId});
+      await setDoc(doc(fbDb,"groups",groupId,"settings","invite"),{code});
+      toast("Einladungscode erzeugt ✓");
+    }catch(e){ console.warn(e); toast("Code konnte nicht erzeugt werden – bitte Berechtigung prüfen","err"); }
+    setBusy(false);
+  };
+  return(<div style={{marginBottom:16,padding:"14px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`}}>
+    <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>🔗 Einladung</div>
+    <div style={{fontSize:13,color:C.muted,marginBottom:10}}>Für dieses Team gibt es noch keinen Einladungscode. Mit dem Code entstehen auch die Einladungslinks.</div>
+    <Btn onClick={create} disabled={busy}>{busy?"…":"Einladungscode erzeugen"}</Btn>
+  </div>);
+}
+
 // ── TEAMS: wechseln, weiteres Team anlegen oder beitreten (alle Rollen) ──
 function TeamsCard({user,groupId,memberships,onSwitchGroup,toast,canRename=false}) {
   const allGroups=useAllGroups(user);
@@ -4719,6 +4740,7 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
   const isCoach = role==="admin" || role==="trainer"; // Einladung teilen, Konten mit Spielerprofilen verknüpfen
   const [members,setMembers]=useState([]);
   const [inviteCode,setInviteCode]=useState(null);
+  const [inviteChecked,setInviteChecked]=useState(false); // true, sobald bekannt ist, ob es schon einen Code gibt
   const [copied,setCopied]=useState(false);
   const [linkFor,setLinkFor]=useState(null); // uid des Mitglieds, dessen Kinder gerade verknüpft werden
 
@@ -4730,10 +4752,12 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
     return unsub;
   },[groupId]);
   useEffect(()=>{
+    setInviteChecked(false);
     if(!fbDb||!groupId||!isCoach){ setInviteCode(null); return; }
     const unsub=onSnapshot(doc(fbDb,"groups",groupId,"settings","invite"),snap=>{
       setInviteCode(snap.exists()?snap.data().code:null);
-    },()=>{});
+      setInviteChecked(true);
+    },()=>setInviteChecked(true));
     return unsub;
   },[groupId,isCoach]);
   const joinRequests=useJoinRequests(groupId, canManage);
@@ -4805,7 +4829,7 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
     {!isCoach&&<div style={{fontSize:13,color:C.muted}}>Nur Trainer und Admins können Mitglieder verwalten und Einladungen verschicken.</div>}
 
     {isCoach&&<>
-      {inviteCode&&<InviteCard code={inviteCode} toast={toast}/>}
+      {inviteCode?<InviteCard code={inviteCode} toast={toast}/>:(inviteChecked&&<InviteCreateCard groupId={groupId} toast={toast}/>)}
 
       {joinRequests.length>0&&<div style={{marginBottom:16}}>
         <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>⏳ Offene Beitrittswünsche ({joinRequests.length})</div>
