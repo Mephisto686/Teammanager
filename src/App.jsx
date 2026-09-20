@@ -542,13 +542,13 @@ const LOG_CATS = {
   team:      {label:"Team",             icon:"🏟", tier:"coach"},
 };
 const LOG_IGNORE = new Set(["updatedAt","createdAt","createdBy","createdByName","modifiedAt","seriesId"]);
-const LOG_FIELDS = {name:"Name",strength:"Stärke",active:"Status",jersey:"Trikot",notes:"Notizen",contacts:"Kontakte",birthYear:"Jahrgang",birthDate:"Geburtsdatum",vereinsmitglied:"Vereinsmitglied",spielerpass:"Spielerpass",phone:"Telefon",title:"Titel",description:"Beschreibung",date:"Datum",time:"Uhrzeit",startTime:"Beginn",duration:"Dauer",location:"Ort",hosting:"Ausrichter",amount:"Betrag",category:"Kategorie",type:"Art",exerciseIds:"Übungen",playerIds:"Anwesende",coachIds:"Trainer",teams:"Teams",weather:"Wetter",participantCount:"Teilnehmerzahl",planData:"Plan",focus:"Schwerpunkt",matches:"Spielplan/Ergebnisse",isDraft:"Status",done:"Erledigt",agenda:"Agenda",rsvpRule:"Anmeldeschluss"};
+const LOG_FIELDS = {name:"Name",strength:"Stärke",active:"Status",jersey:"Trikot",notes:"Notizen",contacts:"Kontakte",birthYear:"Jahrgang",birthDate:"Geburtsdatum",vereinsmitglied:"Vereinsmitglied",spielerpass:"Spielerpass",phone:"Telefon",title:"Titel",description:"Beschreibung",date:"Datum",time:"Uhrzeit",startTime:"Beginn",duration:"Dauer",location:"Ort",meetTime:"Treffzeit",hosting:"Ausrichter",amount:"Betrag",category:"Kategorie",type:"Art",exerciseIds:"Übungen",playerIds:"Anwesende",coachIds:"Trainer",teams:"Teams",weather:"Wetter",participantCount:"Teilnehmerzahl",planData:"Plan",focus:"Schwerpunkt",matches:"Spielplan/Ergebnisse",isDraft:"Status",done:"Erledigt",agenda:"Agenda",rsvpRule:"Anmeldeschluss"};
 const logVal = (k,v) => (k==="date"&&v)?fmtDate(v):(v===undefined||v===null||v===""?"–":String(v));
 const sessLabel = it => `Training am ${fmtDate(it.date)}${it.time?` · ${it.time} Uhr`:""}`;
 // Je Sammlung: Beschriftung, Kategorie, ggf. welche Felder für ALLE sichtbar sind (Termin-Daten) und welche nur für Trainer (Planung)
 const LOG_CFG = {
-  sessions:{ noun:"Trainings", label:sessLabel, cat:"training", pubCat:"termine", pubFields:["date","time","duration","location"], pubItem:it=>!it.isDraft },
-  tournaments:{ noun:"Turniere", label:t=>`Turnier „${t.name||""}"`, cat:"turniere", pubCat:"termine", pubFields:["name","date","startTime","location","hosting"], pubItem:()=>true },
+  sessions:{ noun:"Trainings", label:sessLabel, cat:"training", pubCat:"termine", pubFields:["date","time","duration","location","meetTime"], pubItem:it=>!it.isDraft },
+  tournaments:{ noun:"Turniere", label:t=>`Turnier „${t.name||""}"`, cat:"turniere", pubCat:"termine", pubFields:["name","date","startTime","location","hosting","meetTime"], pubItem:()=>true },
   recurringSlots:{ noun:"Trainingszeiten", label:s=>`Trainingszeit ${weekdayLabel(s.weekday)} ${s.time||""}`.trim(), cat:"termine" },
   meetings:{ noun:"Trainertreffen", label:m=>`Trainertreff „${m.title||""}"${m.date?` am ${fmtDate(m.date)}`:""}`, cat:"treffen" },
   players:{ noun:"Spieler", label:p=>`Spieler ${p.name||""}`, cat:"spieler" },
@@ -630,12 +630,88 @@ function useActivityLog(groupId, user, role) {
 const fmtDeadline = ms => new Date(ms).toLocaleString("de-DE",{weekday:"short",day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})+" Uhr";
 const evStartMs = ev => { const [y,m,d]=ev.date.split("-").map(Number); const [hh,mm]=(ev.time||"00:00").split(":").map(Number); return new Date(y,m-1,d,hh||0,mm||0).getTime(); };
 const toLocalInput = ms => { const d=new Date(ms); const p=n=>String(n).padStart(2,"0"); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
-const DEADLINE_PRESETS = [
-  {k:"h2",  label:"2 Std. vor Beginn",  needsTime:true,  calc:ev=>evStartMs(ev)-2*3600e3},
-  {k:"h12", label:"12 Std. vor Beginn", needsTime:true,  calc:ev=>evStartMs(ev)-12*3600e3},
-  {k:"h24", label:"24 Std. vor Beginn", needsTime:true,  calc:ev=>evStartMs(ev)-24*3600e3},
-  {k:"eve", label:"Vorabend 18:00",     needsTime:false, calc:ev=>{const [y,m,d]=ev.date.split("-").map(Number);return new Date(y,m-1,d-1,18,0).getTime();}},
-];
+// Anmeldeschluss-Regeln als Text: "m<Minuten>" = so viele Minuten vor Beginn; "d<Tage>@HH:MM" = X Tage vor dem Termin um HH:MM (0 = am Termintag).
+// Alte Kürzel (h2, h12, h24, eve) gelten weiter.
+const LEGACY_RULES = {h2:"m120",h12:"m720",h24:"m1440",eve:"d1@18:00"};
+const normRule = r => (r&&LEGACY_RULES[r])||r||"";
+const p2 = n => String(n).padStart(2,"0");
+function parseRule(rule){
+  const r=normRule(rule); if(!r) return null;
+  let m=/^m(\d+)$/.exec(r); if(m) return {type:"before",min:Number(m[1])};
+  m=/^d(\d+)@(\d{2}):(\d{2})$/.exec(r); if(m) return {type:"day",days:Number(m[1]),h:Number(m[2]),mi:Number(m[3])};
+  return null;
+}
+const ruleNeedsTime = rule => parseRule(rule)?.type==="before";
+function ruleDeadline(rule,ev){
+  const p=parseRule(rule); if(!p||!ev?.date) return null;
+  if(p.type==="before"){ if(!ev.time) return null; return evStartMs(ev)-p.min*60000; }
+  const [y,mo,d]=ev.date.split("-").map(Number);
+  return new Date(y,mo-1,d-p.days,p.h,p.mi).getTime();
+}
+function ruleLabel(rule){
+  const p=parseRule(rule); if(!p) return "";
+  if(p.type==="before"){ const m=p.min; if(m>0&&m%1440===0) return `${m/1440} ${m/1440===1?"Tag":"Tage"} vor Beginn`; if(m>0&&m%60===0) return `${m/60} Std. vor Beginn`; return `${m} Min. vor Beginn`; }
+  const t=`${p2(p.h)}:${p2(p.mi)} Uhr`;
+  return p.days===0?`am Termintag um ${t}`:p.days===1?`Vortag um ${t}`:`${p.days} Tage vorher um ${t}`;
+}
+const DEADLINE_PRESETS = ["m120","m720","m1440","d1@18:00"].map(k=>({k,label:ruleLabel(k),needsTime:ruleNeedsTime(k),calc:ev=>ruleDeadline(k,ev)}));
+// ── Treffzeit: Standard 15 Min. vor Training, 30 Min. vor Turnier (optional, überschreibbar) ──
+const MEET_OFFSET_MIN = {training:15, turnier:30};
+function timeMinusMin(t,min){ if(!t||!/^\d{1,2}:\d{2}$/.test(t)) return ""; const [h,m]=t.split(":").map(Number); const x=h*60+m-min; if(x<0) return ""; return `${p2(Math.floor(x/60))}:${p2(x%60)}`; }
+const defaultMeetTime = (type,start) => timeMinusMin(start,MEET_OFFSET_MIN[type]||15);
+// meet: undefined = Standard (folgt der Startzeit), "" = bewusst keine Treffzeit, "HH:MM" = eigene Treffzeit
+const effMeetTime = (type,start,meet) => (meet===undefined||meet===null)?defaultMeetTime(type,start):(meet||"");
+const tournamentMeet = t => effMeetTime("turnier",t.hosting==="other"?"":(t.startTime||""),t.meetTime);
+// ── Google-Maps-Link für Adressen ──
+const mapsUrl = q => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
+function MapLink({place,label,style}) {
+  if(!place) return null;
+  return <a href={mapsUrl(place)} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} title="In Google Maps öffnen" style={{color:C.primary,textDecoration:"none",fontWeight:600,...style}}>{label||`📍 ${place}`}</a>;
+}
+// Frei einstellbarer Anmeldeschluss (Zeitspanne vor Beginn oder Uhrzeit an einem Tag davor)
+const UNIT_MIN = {m:1,h:60,d:1440};
+function ruleToLoc(rule){
+  const p=parseRule(rule);
+  if(!p) return {mode:"none",amount:2,unit:"h",days:1,at:"18:00"};
+  if(p.type==="before"){ const m=p.min; if(m>0&&m%1440===0) return {mode:"before",amount:m/1440,unit:"d",days:1,at:"18:00"}; if(m>0&&m%60===0) return {mode:"before",amount:m/60,unit:"h",days:1,at:"18:00"}; return {mode:"before",amount:m,unit:"m",days:1,at:"18:00"}; }
+  return {mode:"day",amount:2,unit:"h",days:p.days,at:`${p2(p.h)}:${p2(p.mi)}`};
+}
+function locToRule(l){
+  if(l.mode==="before"){ const n=Math.round(Number(l.amount)); if(!(n>0)) return null; return `m${n*UNIT_MIN[l.unit]}`; }
+  if(l.mode==="day"){ const d=Math.round(Number(l.days)); if(!(d>=0)) return null; return `d${Math.min(d,60)}@${/^\d{2}:\d{2}$/.test(l.at)?l.at:"18:00"}`; }
+  return "";
+}
+function DeadlineRuleEditor({value,onChange,sample,allowNone=true}) {
+  const [loc,setLoc]=useState(()=>ruleToLoc(value));
+  useEffect(()=>{ const cur=locToRule(loc); if(cur!==null&&cur!==normRule(value)) setLoc(ruleToLoc(value)); },[value]); // eslint-disable-line
+  const upd=patch=>{ const n={...loc,...patch}; setLoc(n); const r=locToRule(n); if(r!==null) onChange(r); };
+  const box={padding:"8px 10px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:14,color:C.text,background:"white",fontFamily:"inherit",outline:"none",boxSizing:"border-box"};
+  const chip={padding:"4px 10px",borderRadius:20,border:`1.5px solid ${C.border}`,background:C.card,color:C.text,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"};
+  const prev=sample&&value?ruleDeadline(value,sample):null;
+  return(<div style={{marginBottom:12}}>
+    <Sel label="Anmeldeschluss" value={loc.mode} onChange={e=>upd({mode:e.target.value})}>
+      {allowNone&&<option value="none">Kein Anmeldeschluss</option>}
+      <option value="before">Zeitspanne vor Beginn</option>
+      <option value="day">Uhrzeit an einem Tag davor</option>
+    </Sel>
+    {loc.mode==="before"&&<div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginTop:-6,marginBottom:8}}>
+      <input type="number" min={1} value={loc.amount} onChange={e=>upd({amount:e.target.value})} style={{...box,width:84}}/>
+      <select value={loc.unit} onChange={e=>upd({unit:e.target.value})} style={box}><option value="m">Minuten</option><option value="h">Stunden</option><option value="d">Tage</option></select>
+      <span style={{fontSize:13,color:C.muted}}>vor Beginn</span>
+    </div>}
+    {loc.mode==="day"&&<div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",marginTop:-6,marginBottom:8}}>
+      <input type="number" min={0} max={60} value={loc.days} onChange={e=>upd({days:e.target.value})} style={{...box,width:72}}/>
+      <span style={{fontSize:13,color:C.muted}}>Tag(e) vorher um</span>
+      <input type="time" value={loc.at} onChange={e=>upd({at:e.target.value})} style={box}/>
+      <span style={{fontSize:11,color:C.muted}}>(0 = am Termintag selbst)</span>
+    </div>}
+    <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+      <span style={{fontSize:11,color:C.muted,fontWeight:700}}>Schnell:</span>
+      {DEADLINE_PRESETS.map(p=><button key={p.k} type="button" onClick={()=>{setLoc(ruleToLoc(p.k));onChange(p.k);}} style={chip}>{p.label}</button>)}
+    </div>
+    {sample&&value&&<div style={{fontSize:11,color:C.muted,marginTop:8}}>{prev!=null?`Beispiel: ${fmtDate(sample.date)}${sample.time?` ${sample.time} Uhr`:""} → Anmeldeschluss ${fmtDeadline(prev)}`:"Für diese Regel wird die Uhrzeit des Termins benötigt."}</div>}
+  </div>);
+}
 function useNow(ms=30000){ const [n,setN]=useState(Date.now()); useEffect(()=>{const t=setInterval(()=>setN(Date.now()),ms);return()=>clearInterval(t);},[ms]); return n; }
 function useEventMeta(groupId, user) {
   const [meta,setMeta] = useState({});
@@ -706,8 +782,8 @@ function useRsvps(groupId, user) {
 function buildRsvpEvents(sessions, tournaments) {
   const today = todayISO();
   return [
-    ...(sessions||[]).filter(s=>s.date>=today&&!s.isDraft).map(s=>({key:"tr-"+s.id,type:"training",date:s.date,time:s.time||"",title:"Training",location:s.location||"",duration:s.duration||""})),
-    ...(tournaments||[]).filter(t=>t.date>=today).map(t=>({key:"tn-"+t.id,type:"turnier",date:t.date,time:t.hosting==="other"?"":(t.startTime||""),title:t.name||"Turnier",location:t.location||"",hosting:t.hosting||""})),
+    ...(sessions||[]).filter(s=>s.date>=today&&!s.isDraft).map(s=>({key:"tr-"+s.id,type:"training",date:s.date,time:s.time||"",title:"Training",location:s.location||"",duration:s.duration||"",meetTime:effMeetTime("training",s.time,s.meetTime)})),
+    ...(tournaments||[]).filter(t=>t.date>=today).map(t=>({key:"tn-"+t.id,type:"turnier",date:t.date,time:t.hosting==="other"?"":(t.startTime||""),title:t.name||"Turnier",location:t.location||"",hosting:t.hosting||"",meetTime:tournamentMeet(t)})),
   ].sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));
 }
 
@@ -738,7 +814,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.44.0";
+const APP_VERSION = "3.45.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -819,6 +895,7 @@ function buildSessionsFromSlots(slots, startDate, endDate, existingSessions) {
       created.push({
         id: uid(), date: d, time: slot.time||"", duration: slot.duration||60, location: slot.location||"",
         weather:"", participantCount:"", coachIds:[], playerIds:[], exerciseIds:[], teams:[], notes:"",
+        ...(slot.meetTime!==undefined?{meetTime:slot.meetTime}:{}),
         seriesId: slot.id, createdAt: now(),
       });
       existingKeys.add(key);
@@ -1673,7 +1750,7 @@ function ContactsEditor({contacts,onChange}) {
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><label style={{fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:.6}}>Kontaktpersonen ({contacts.length})</label><Btn sm onClick={startAdd}><Plus size={12}/> Hinzufügen</Btn></div>
     {contacts.length===0&&<div style={{fontSize:13,color:C.muted,padding:"6px 0"}}>Noch keine Kontaktperson eingetragen.</div>}
     {contacts.map((c,i)=><div key={c.id||i} style={{background:"#f8fafc",borderRadius:8,border:`1px solid ${C.border}`,padding:"10px 14px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
-      <div><div style={{fontWeight:700,fontSize:14,color:C.text}}>{c.name} <span style={{fontSize:12,color:C.muted,fontWeight:400}}>({c.relation})</span></div>{c.phone&&<div style={{fontSize:13,color:C.muted,marginTop:2}}>📞 {c.phone}</div>}{c.email&&<div style={{fontSize:13,color:C.muted}}>✉️ {c.email}</div>}{c.address&&<div style={{fontSize:12,color:C.muted}}>📍 {c.address}</div>}</div>
+      <div><div style={{fontWeight:700,fontSize:14,color:C.text}}>{c.name} <span style={{fontSize:12,color:C.muted,fontWeight:400}}>({c.relation})</span></div>{c.phone&&<div style={{fontSize:13,color:C.muted,marginTop:2}}>📞 {c.phone}</div>}{c.email&&<div style={{fontSize:13,color:C.muted}}>✉️ {c.email}</div>}{c.address&&<div style={{fontSize:12,color:C.muted}}><MapLink place={c.address}/></div>}</div>
       <div style={{display:"flex",gap:4,flexShrink:0}}><button onClick={()=>startEdit(i)} style={{background:"none",border:"none",cursor:"pointer",color:C.muted,padding:4}}><Edit2 size={13}/></button><button onClick={()=>remove(i)} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",padding:4}}><Trash2 size={13}/></button></div>
     </div>)}
   </div>);
@@ -2248,8 +2325,9 @@ function SessionDetailView({s,players,coaches,exercises,rsvps,onDelete,onClose,o
       ))}
     </div>
     {/* Location + weather */}
-    {(s.location||s.weather)&&<div style={{display:"flex",gap:10,marginBottom:14,fontSize:13,color:C.muted}}>
-      {s.location&&<span>📍 {s.location}</span>}
+    {(s.location||s.weather||effMeetTime("training",s.time,s.meetTime))&&<div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:14,fontSize:13,color:C.muted}}>
+      {effMeetTime("training",s.time,s.meetTime)&&<span>🕒 Treff {effMeetTime("training",s.time,s.meetTime)} Uhr</span>}
+      {s.location&&<span><MapLink place={s.location}/></span>}
       {s.weather&&<span>🌤 {s.weather}</span>}
     </div>}
     {/* Trainer */}
@@ -3018,7 +3096,7 @@ function MeetingCard({m,onEdit,onDel,onSave,readOnly,initialOpen}) {
       <div style={{width:40,height:40,borderRadius:10,background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,flexShrink:0}}>📅</div>
       <div style={{flex:1,minWidth:0}}>
         <div style={{fontWeight:800,fontSize:15,color:C.text}}>{m.title||"Trainertreff"}</div>
-        <div style={{fontSize:12,color:C.muted,marginTop:2}}>{m.date?new Date(m.date+"T12:00").toLocaleDateString("de-DE",{weekday:"long",day:"numeric",month:"long",year:"numeric"}):""}{m.location?` · 📍 ${m.location}`:""}{agenda.length>0?` · ${doneCount}/${agenda.length} Punkte`:""}</div>
+        <div style={{fontSize:12,color:C.muted,marginTop:2}}>{m.date?new Date(m.date+"T12:00").toLocaleDateString("de-DE",{weekday:"long",day:"numeric",month:"long",year:"numeric"}):""}{m.location&&<> · <MapLink place={m.location}/></>}{agenda.length>0?` · ${doneCount}/${agenda.length} Punkte`:""}</div>
       </div>
       <div style={{display:"flex",gap:4,alignItems:"center"}} onClick={e=>e.stopPropagation()}>
         {!readOnly&&<button onClick={onEdit} style={{background:"none",border:"none",cursor:"pointer",color:C.muted,padding:6}}><Edit2 size={16}/></button>}
@@ -3248,7 +3326,7 @@ function CalendarPage({rsvps={},eventMeta={},onSetDeadline,onSetRsvp,recurringSl
             {s.seriesId&&<span style={{fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:20,background:C.accentL,color:C.primary}}>🔁 Serie</span>}
             <span style={{fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:20,background:planned?"#dcfce7":"#fef3c7",color:planned?"#16a34a":"#b45309"}}>{planned?"✅ Geplant":"🕒 Ungeplant"}</span>
           </div>
-          <div style={{fontSize:12,color:C.muted,marginTop:2}}>Training · ⏱ {s.duration} Min{kids>0?` · 👥 ${kids}`:""}{s.location?` · 📍 ${s.location}`:""}{ex.length>0?` · ${ex.length} Übung${ex.length!==1?"en":""}`:""}</div>
+          <div style={{fontSize:12,color:C.muted,marginTop:2}}>Training · ⏱ {s.duration} Min{kids>0?` · 👥 ${kids}`:""}{effMeetTime("training",s.time,s.meetTime)?` · 🕒 Treff ${effMeetTime("training",s.time,s.meetTime)}`:""}{s.location&&<> · <MapLink place={s.location}/></>}{ex.length>0?` · ${ex.length} Übung${ex.length!==1?"en":""}`:""}</div>
         </div>
       </div>);
     }
@@ -3260,7 +3338,7 @@ function CalendarPage({rsvps={},eventMeta={},onSetDeadline,onSetRsvp,recurringSl
         <div style={{width:40,height:40,borderRadius:10,background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>🧑‍🏫</div>
         <div style={{flex:1,minWidth:0}}>
           <div style={{fontWeight:800,fontSize:14,color:C.text}}>{m.title||"Trainertreff"}</div>
-          <div style={{fontSize:12,color:C.muted,marginTop:2}}>Treffen · {fmtDate(m.date)}{m.location?` · 📍 ${m.location}`:""}{agenda.length>0?` · ${doneCount}/${agenda.length} Punkte`:""}</div>
+          <div style={{fontSize:12,color:C.muted,marginTop:2}}>Treffen · {fmtDate(m.date)}{m.location&&<> · <MapLink place={m.location}/></>}{agenda.length>0?` · ${doneCount}/${agenda.length} Punkte`:""}</div>
         </div>
       </div>);
     }
@@ -3270,7 +3348,7 @@ function CalendarPage({rsvps={},eventMeta={},onSetDeadline,onSetRsvp,recurringSl
       <div style={{width:40,height:40,borderRadius:10,background:"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>🏆</div>
       <div style={{flex:1,minWidth:0}}>
         <div style={{fontWeight:800,fontSize:14,color:C.text}}>{t.name||"Turnier"}</div>
-        <div style={{fontSize:12,color:C.muted,marginTop:2}}>Spieltag · {fmtDate(t.date)}{(t.teams||[]).length>0?` · ${t.teams.length} Teams`:""}{total>0?` · ${played}/${total} Spiele`:""}</div>
+        <div style={{fontSize:12,color:C.muted,marginTop:2}}>Spieltag · {fmtDate(t.date)}{tournamentMeet(t)?` · 🕒 Treff ${tournamentMeet(t)}`:""}{t.location&&<> · <MapLink place={t.location}/></>}{(t.teams||[]).length>0?` · ${t.teams.length} Teams`:""}{total>0?` · ${played}/${total} Spiele`:""}</div>
       </div>
     </div>);
   };
@@ -3285,7 +3363,7 @@ function CalendarPage({rsvps={},eventMeta={},onSetDeadline,onSetRsvp,recurringSl
     const card=renderItemBase(it);
     if(!onSetRsvp||readOnly||it.date<todayStr||(it.type!=="training"&&it.type!=="spieltag")||(it.type==="training"&&it.raw.isDraft)) return card;
     const ev={key:(it.type==="training"?"tr-":"tn-")+it.raw.id,type:it.type==="training"?"training":"turnier",date:it.date,time:it.type==="training"?(it.raw.time||""):(it.raw.hosting==="other"?"":(it.raw.startTime||""))};
-    return(<div key={it.id}>{card}<RsvpInline ev={ev} players={players} rsvps={rsvps} onSetRsvp={onSetRsvp} toast={toast} deadlineMs={eventMeta[ev.key]?.deadlineMs||null} onSetDeadline={onSetDeadline} onPreset={applyPreset} series={it.type==="training"&&it.raw.seriesId?{ruleLabel:DEADLINE_PRESETS.find(p=>p.k===(recurringSlots||[]).find(x=>x.id===it.raw.seriesId)?.rsvpRule)?.label||null,manual:!!eventMeta[ev.key]?.manual}:null} onOpenSlots={()=>setModal({type:"slots"})}/></div>);
+    return(<div key={it.id}>{card}<RsvpInline ev={ev} players={players} rsvps={rsvps} onSetRsvp={onSetRsvp} toast={toast} deadlineMs={eventMeta[ev.key]?.deadlineMs||null} onSetDeadline={onSetDeadline} onPreset={applyPreset} series={it.type==="training"&&it.raw.seriesId?{ruleLabel:ruleLabel((recurringSlots||[]).find(x=>x.id===it.raw.seriesId)?.rsvpRule)||null,manual:!!eventMeta[ev.key]?.manual}:null} onOpenSlots={()=>setModal({type:"slots"})}/></div>);
   };
 
   return(<div>
@@ -3401,7 +3479,7 @@ function RecurringSlotsTab({slots,sessions,onSaveSlot,onDeleteSlot,onGenerateSes
         <div style={{fontSize:22}}>🔁</div>
         <div style={{flex:1,minWidth:0}}>
           <div style={{fontWeight:700,fontSize:14,color:C.text}}>{weekdayLabel(s.weekday)} · {s.time||"–"} Uhr</div>
-          <div style={{fontSize:12,color:C.muted,marginTop:2}}>⏱ {s.duration||60} Min{s.location?` · 📍 ${s.location}`:""}{s.rsvpRule&&DEADLINE_PRESETS.find(p=>p.k===s.rsvpRule)?` · ⏰ Anmeldeschluss ${DEADLINE_PRESETS.find(p=>p.k===s.rsvpRule).label}`:""}</div>
+          <div style={{fontSize:12,color:C.muted,marginTop:2}}>⏱ {s.duration||60} Min{effMeetTime("training",s.time,s.meetTime)?` · 🕒 Treff ${effMeetTime("training",s.time,s.meetTime)}`:""}{s.location&&<> · <MapLink place={s.location}/></>}{ruleLabel(s.rsvpRule)?` · ⏰ Anmeldeschluss ${ruleLabel(s.rsvpRule)}`:""}</div>
         </div>
         <button onClick={e=>{e.stopPropagation();del(s);}} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",padding:4,flexShrink:0}}><Trash2 size={15}/></button>
       </div>
@@ -3415,12 +3493,31 @@ function RecurringSlotsTab({slots,sessions,onSaveSlot,onDeleteSlot,onGenerateSes
   </div>);
 }
 
+// Optionale Treffzeit: Standard folgt der Startzeit (Training 15 Min., Turnier 30 Min. vorher); kann geändert oder entfernt werden
+function MeetTimeField({type,start,value,onChange}) {
+  const auto=value===undefined||value===null;
+  const def=defaultMeetTime(type,start);
+  const shown=auto?def:value;
+  const small={padding:"5px 10px",borderRadius:20,border:`1.5px solid ${C.border}`,background:C.card,color:C.text,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"};
+  return(<div style={{marginBottom:14}}>
+    <label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:5,textTransform:"uppercase",letterSpacing:.6}}>Treffzeit (optional)</label>
+    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+      <input type="time" value={shown||""} onChange={e=>onChange(e.target.value)} style={{padding:"9px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:14,color:C.text,background:"white",fontFamily:"inherit",outline:"none"}}/>
+      {!auto&&<button type="button" onClick={()=>onChange(undefined)} style={small}>↺ Standard{def?` (${def})`:""}</button>}
+      {shown&&<button type="button" onClick={()=>onChange("")} style={small}>✕ ohne Treffzeit</button>}
+    </div>
+    <div style={{fontSize:11,color:C.muted,marginTop:5}}>{auto?(def?`Standard: ${MEET_OFFSET_MIN[type]||15} Min. vor Beginn – passt sich an, wenn du die Uhrzeit änderst.`:"Sobald eine Uhrzeit eingetragen ist, wird die Treffzeit vorgeschlagen."):(value?"Eigene Treffzeit.":"Keine Treffzeit für diesen Termin.")}</div>
+  </div>);
+}
+
 function SlotForm({slot,onSave,onClose}) {
   const [weekday,setWeekday]=useState(slot?.weekday||1);
   const [time,setTime]=useState(slot?.time||"16:00");
   const [duration,setDuration]=useState(slot?.duration||60);
   const [location,setLocation]=useState(slot?.location||"");
-  const [rsvpRule,setRsvpRule]=useState(slot?.rsvpRule||"");
+  const [rsvpRule,setRsvpRule]=useState(normRule(slot?.rsvpRule));
+  const [meetTime,setMeetTime]=useState(slot?.meetTime);
+  const sampleDate=(()=>{ let d=todayISO(),g=0; while(isoWeekday(d)!==weekday&&g<8){ d=addDaysISO(d,1); g++; } return d; })();
   return(<div>
     <Sel label="Wochentag" value={weekday} onChange={e=>setWeekday(Number(e.target.value))}>
       {WEEKDAYS.map(w=><option key={w.v} value={w.v}>{w.l}</option>)}
@@ -3430,14 +3527,12 @@ function SlotForm({slot,onSave,onClose}) {
       <Inp label="Dauer (Min)" type="number" min={15} value={duration} onChange={e=>setDuration(Number(e.target.value))}/>
     </div>
     <Inp label="Ort" value={location} onChange={e=>setLocation(e.target.value)} placeholder="Sportplatz..."/>
-    <Sel label="Anmeldeschluss (rollierend)" value={rsvpRule} onChange={e=>setRsvpRule(e.target.value)}>
-      <option value="">Kein Anmeldeschluss</option>
-      {DEADLINE_PRESETS.map(p=><option key={p.k} value={p.k}>{p.label}</option>)}
-    </Sel>
-    <div style={{fontSize:11,color:C.muted,margin:"-6px 0 10px"}}>Gilt automatisch für jeden Termin dieser Serie, jeweils relativ zum Termin. Einzelne Termine lassen sich später separat ändern.</div>
+    <MeetTimeField type="training" start={time} value={meetTime} onChange={setMeetTime}/>
+    <DeadlineRuleEditor value={rsvpRule} onChange={setRsvpRule} sample={{date:sampleDate,time}}/>
+    <div style={{fontSize:11,color:C.muted,margin:"-4px 0 10px"}}>Gilt automatisch für jeden Termin dieser Serie, jeweils relativ zum Termin. Einzelne Termine lassen sich später separat ändern.</div>
     <div style={{display:"flex",gap:10,justifyContent:"flex-end",paddingTop:16,borderTop:`1px solid ${C.border}`}}>
       <Btn onClick={onClose} variant="secondary">Abbrechen</Btn>
-      <Btn onClick={()=>onSave({id:slot?.id||uid(),weekday,time,duration,location,rsvpRule,createdAt:slot?.createdAt||now()})}>{slot?.id?"Speichern":"Anlegen"}</Btn>
+      <Btn onClick={()=>onSave({id:slot?.id||uid(),weekday,time,duration,location,rsvpRule,...(meetTime!==undefined?{meetTime}:{}),createdAt:slot?.createdAt||now()})}>{slot?.id?"Speichern":"Anlegen"}</Btn>
     </div>
   </div>);
 }
@@ -3478,6 +3573,7 @@ function NewTrainingWizard({sessions,players,exercises,rsvps={},initialSetup,ini
   const [duration,setDuration]=useState(initSession?.duration||initialSetup?.duration||60);
   const initLoc=initSession?.location||initialSetup?.location;
   const [location,setLocation]=useState(initLoc&&initLoc!=="outdoor"&&initLoc!=="indoor"?initLoc:"");
+  const [meetTime,setMeetTime]=useState(initSession?initSession.meetTime:initialSetup?.meetTime);
   const [playerIds,setPlayerIds]=useState(initSession?.playerIds||initialSetup?.playerIds||[]);
   const [teams,setTeams]=useState(initSession?.teams||[]);
   const [exerciseIds,setExerciseIds]=useState(initSession?.exerciseIds||[]);
@@ -3485,7 +3581,7 @@ function NewTrainingWizard({sessions,players,exercises,rsvps={},initialSetup,ini
   const [confirmPlayer,setConfirmPlayer]=useState(null); // {id,name} wartet auf Auswahl
   const [newPlayerFormOpen,setNewPlayerFormOpen]=useState(false);
 
-  const selectSlot=s=>{setSelectedSessionId(s.id);setDate(s.date);setTime(s.time||"");setDuration(s.duration||60);setLocation(s.location||"");};
+  const selectSlot=s=>{setSelectedSessionId(s.id);setDate(s.date);setTime(s.time||"");setDuration(s.duration||60);setLocation(s.location||"");setMeetTime(s.meetTime);};
   const togE=id=>setExerciseIds(v=>v.includes(id)?v.filter(x=>x!==id):[...v,id]);
 
   const addPlayer=()=>{
@@ -3502,7 +3598,8 @@ function NewTrainingWizard({sessions,players,exercises,rsvps={},initialSetup,ini
 
   const finish=()=>{
     const existing=selectedSessionId?sessions.find(s=>s.id===selectedSessionId):null;
-    onSaveSession({
+    const withMeet=o=>{ const x={...o}; delete x.meetTime; if(meetTime!==undefined) x.meetTime=meetTime; return x; };
+    onSaveSession(withMeet({
       ...(existing||{}),
       id:existing?.id||uid(),
       date,time,duration,location,
@@ -3510,7 +3607,7 @@ function NewTrainingWizard({sessions,players,exercises,rsvps={},initialSetup,ini
       coachIds:existing?.coachIds?.length?existing.coachIds:(initialSetup?.coachIds||[]),
       weather:existing?.weather||"", participantCount:existing?.participantCount||"", teams:teams.length?teams:(existing?.teams||[]), notes:existing?.notes||"",
       createdAt:existing?.createdAt||now(),
-    });
+    }));
   };
 
   const teamBuilderPlayers=playerIds.length?players.filter(p=>playerIds.includes(p.id)):players.filter(p=>p.active);
@@ -3530,7 +3627,7 @@ function NewTrainingWizard({sessions,players,exercises,rsvps={},initialSetup,ini
           {upcoming.map(s=>{const sel=selectedSessionId===s.id;return(
             <div key={s.id} onClick={()=>selectSlot(s)} style={{padding:"10px 12px",borderRadius:10,border:`1.5px solid ${sel?C.primary:C.border}`,background:sel?C.accentL:C.card,cursor:"pointer"}}>
               <div style={{fontWeight:700,fontSize:13,color:sel?C.primary:C.text}}>{fmtDate(s.date)}{s.time?` · ${s.time} Uhr`:""}</div>
-              <div style={{fontSize:12,color:C.muted,marginTop:2}}>⏱ {s.duration||60} Min{s.location?` · 📍 ${s.location}`:""}</div>
+              <div style={{fontSize:12,color:C.muted,marginTop:2}}>⏱ {s.duration||60} Min{s.location&&<> · <MapLink place={s.location}/></>}</div>
             </div>
           );})}
         </div>
@@ -3544,6 +3641,7 @@ function NewTrainingWizard({sessions,players,exercises,rsvps={},initialSetup,ini
         <Inp label="Dauer (Min)" type="number" min={15} value={duration} onChange={e=>setDuration(Number(e.target.value))}/>
         <Inp label="Ort" value={location} onChange={e=>setLocation(e.target.value)} placeholder="Sportplatz..."/>
       </div>
+      <MeetTimeField type="training" start={time} value={meetTime} onChange={setMeetTime}/>
     </div>}
 
     {step===2&&<div>
@@ -3687,6 +3785,7 @@ function TournamentForm({onSave,onClose}) {
       <Inp label="Uhrzeit" type="time" value={form.startTime} onChange={e=>set("startTime",e.target.value)}/>
     </div>
     <Inp label="Ort" value={form.location} onChange={e=>set("location",e.target.value)} placeholder="z.B. Sportplatz Schanzenstraße"/>
+    <MeetTimeField type="turnier" start={form.hosting==="other"?"":form.startTime} value={form.meetTime} onChange={v=>setForm(f=>{const n={...f}; if(v===undefined) delete n.meetTime; else n.meetTime=v; return n;})}/>
     <Inp label="Gegen wen / teilnehmende Vereine" value={form.opponent} onChange={e=>set("opponent",e.target.value)} placeholder="z.B. SC Sternschanze, FC Falke, ..."/>
     <Sel label="Untergrund" value={form.surface} onChange={e=>set("surface",e.target.value)}>
       <option value="">– auswählen –</option>
@@ -3995,6 +4094,7 @@ function TournamentEditWizard({tournament,players,onSavePlayer,onSave,onClose}) 
         <Inp label="Uhrzeit" type="time" value={form.startTime||""} onChange={e=>set("startTime",e.target.value)}/>
       </div>
       <Inp label="Ort" value={form.location||""} onChange={e=>set("location",e.target.value)} placeholder="z.B. Sportplatz..."/>
+      <MeetTimeField type="turnier" start={form.hosting==="other"?"":(form.startTime||"")} value={form.meetTime} onChange={v=>setForm(f=>{const n={...f}; if(v===undefined) delete n.meetTime; else n.meetTime=v; return n;})}/>
       <Inp label="Gegen wen / teilnehmende Vereine" value={form.opponent||""} onChange={e=>set("opponent",e.target.value)}/>
       <Sel label="Untergrund" value={form.surface||""} onChange={e=>set("surface",e.target.value)}>
         <option value="">– auswählen –</option>
@@ -4134,7 +4234,7 @@ function TournamentDetail({tournament:t,onUpdate,onBack,coaches=[],toast,players
   return(<div>
     <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:20,flexWrap:"wrap"}}>
       <button onClick={onBack} style={{background:"none",border:"none",cursor:"pointer",color:C.muted,fontSize:14,display:"flex",alignItems:"center",gap:4}}>← Zurück</button>
-      <div style={{flex:1}}><h2 style={{margin:0,fontSize:20,fontWeight:900,color:C.text}}>{t.name}</h2><div style={{fontSize:13,color:C.muted}}>{t.hosting==="other"?`${fmtDate(t.date)}${t.location?` · 📍 ${t.location}`:""}${t.opponent?` · ⚽ ${t.opponent}`:""}`:`${fmtDate(t.date)} · ${t.teams.length} Teams · ${played}/${t.matches.length} Spiele · ${t.matchDuration} Min/Spiel${hasRueckrunde?" · 🔁 Hin- & Rückrunde":""}`}</div></div>
+      <div style={{flex:1}}><h2 style={{margin:0,fontSize:20,fontWeight:900,color:C.text}}>{t.name}</h2><div style={{fontSize:13,color:C.muted}}>{fmtDate(t.date)}{tournamentMeet(t)?` · 🕒 Treff ${tournamentMeet(t)}`:""}{t.location&&<> · <MapLink place={t.location}/></>}{t.hosting==="other"?(t.opponent?` · ⚽ ${t.opponent}`:""):` · ${t.teams.length} Teams · ${played}/${t.matches.length} Spiele · ${t.matchDuration} Min/Spiel${hasRueckrunde?" · 🔁 Hin- & Rückrunde":""}`}</div></div>
       {t.hosting!=="other"&&!hasRueckrunde&&<Btn sm variant="secondary" onClick={()=>setRueckrundeModal(true)}>🔁 Rückrunde erstellen</Btn>}
       {t.hosting!=="other"&&<Btn sm variant="secondary" onClick={printTournament}>🖨️ Turnierplan PDF</Btn>}
       <Btn sm variant="secondary" onClick={()=>setEditModal(true)}><Edit2 size={13}/> Bearbeiten</Btn>
@@ -5563,13 +5663,13 @@ function StartTeaser({icon,title,sub,badge,onClick}) {
 }
 
 // Termin-Karte der Trainer-Startseite (gleicher Stil wie bei Eltern), mit Planungsstatus und Rückmeldungen
-function StartEventCard({icon,iconBg,date,time,sub,chip,chipColor,counts,onClick}) {
+function StartEventCard({icon,iconBg,date,time,sub,meet,place,chip,chipColor,counts,onClick}) {
   return(<div onClick={onClick} style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"10px 12px",marginBottom:10,cursor:onClick?"pointer":"default"}}>
     <div style={{display:"flex",alignItems:"center",gap:10}}>
       <div style={{width:40,height:40,borderRadius:10,background:iconBg||"#eff6ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{icon}</div>
       <div style={{flex:1,minWidth:0}}>
         <div style={{fontWeight:800,fontSize:14,color:C.text}}>{fmtDate(date)}{time?` · ${time} Uhr`:""}</div>
-        <div style={{fontSize:12,color:C.muted,marginTop:2}}>{sub}</div>
+        <div style={{fontSize:12,color:C.muted,marginTop:2}}>{sub}{meet?` · 🕒 Treff ${meet}`:""}{place&&<> · <MapLink place={place}/></>}</div>
       </div>
       {chip&&<span style={{fontSize:11,fontWeight:800,padding:"3px 9px",borderRadius:20,background:chipColor?.bg||"#f1f5f9",color:chipColor?.text||C.muted,whiteSpace:"nowrap",flexShrink:0}}>{chip}</span>}
       <span style={{color:C.muted,fontSize:20,lineHeight:1,flexShrink:0}}>›</span>
@@ -5615,9 +5715,9 @@ function StartPage({rsvps,players,coaches,sessions,tournaments,todos,meetings,te
 
   const rsvpCount=key=>{ const c={yes:0,maybe:0,no:0,open:0}; activePlayers.forEach(p=>{const st=rsvps?.[rsvpKey(key,p.id)]?.status; if(st==="yes")c.yes++; else if(st==="maybe")c.maybe++; else if(st==="no")c.no++; else c.open++;}); return c; };
   const nextItems=[
-    ...(sessions||[]).filter(s=>s.date>=today&&!s.isDraft).map(s=>({date:s.date,time:s.time||"",icon:"📅",iconBg:"#eff6ff",sub:`Training${s.location?` · 📍 ${s.location}`:""}${s.duration?` · ⏱ ${s.duration} Min`:""}`,chip:isSessionPlanned(s)?"✅ Geplant":"🕒 Ungeplant",chipColor:isSessionPlanned(s)?{bg:"#dcfce7",text:"#16a34a"}:{bg:"#fef3c7",text:"#b45309"},counts:rsvps?rsvpCount("tr-"+s.id):null,onClick:()=>onOpenCalendarItem?onOpenCalendarItem({type:"training",id:s.id}):onNavigate("training")})),
-    ...(tournaments||[]).filter(t=>t.date>=today).map(t=>({date:t.date,time:t.hosting==="other"?"":(t.startTime||""),icon:"🏆",iconBg:"#f0fdf4",sub:`${t.name||"Turnier"}${t.location?` · 📍 ${t.location}`:""}`,counts:rsvps?rsvpCount("tn-"+t.id):null,onClick:()=>onOpenTournament?onOpenTournament(t.id):onNavigate("turnier")})),
-    ...(meetings||[]).filter(m=>m.date>=today).map(m=>({date:m.date,time:m.time||"",icon:"🧑‍🏫",iconBg:"#faf5ff",sub:`Trainertreff${m.title?` · ${m.title}`:""}`,onClick:()=>onOpenCalendarItem?onOpenCalendarItem({type:"meeting",id:m.id}):onNavigate("calendar")})),
+    ...(sessions||[]).filter(s=>s.date>=today&&!s.isDraft).map(s=>({date:s.date,time:s.time||"",icon:"📅",iconBg:"#eff6ff",sub:`Training${s.duration?` · ⏱ ${s.duration} Min`:""}`,meet:effMeetTime("training",s.time,s.meetTime),place:s.location,chip:isSessionPlanned(s)?"✅ Geplant":"🕒 Ungeplant",chipColor:isSessionPlanned(s)?{bg:"#dcfce7",text:"#16a34a"}:{bg:"#fef3c7",text:"#b45309"},counts:rsvps?rsvpCount("tr-"+s.id):null,onClick:()=>onOpenCalendarItem?onOpenCalendarItem({type:"training",id:s.id}):onNavigate("training")})),
+    ...(tournaments||[]).filter(t=>t.date>=today).map(t=>({date:t.date,time:t.hosting==="other"?"":(t.startTime||""),icon:"🏆",iconBg:"#f0fdf4",sub:`${t.name||"Turnier"}`,meet:tournamentMeet(t),place:t.location,counts:rsvps?rsvpCount("tn-"+t.id):null,onClick:()=>onOpenTournament?onOpenTournament(t.id):onNavigate("turnier")})),
+    ...(meetings||[]).filter(m=>m.date>=today).map(m=>({date:m.date,time:m.time||"",icon:"🧑‍🏫",iconBg:"#faf5ff",sub:`Trainertreff${m.title?` · ${m.title}`:""}`,place:m.location,onClick:()=>onOpenCalendarItem?onOpenCalendarItem({type:"meeting",id:m.id}):onNavigate("calendar")})),
   ].sort((a,b)=>(a.date+(a.time||"")).localeCompare(b.date+(b.time||""))).slice(0,5);
 
   const teasers=[
@@ -5913,6 +6013,7 @@ function RsvpInline({ev,players,rsvps,onSetRsvp,toast,deadlineMs,onSetDeadline,o
   const [open,setOpen]=useState(false);
   const [editDl,setEditDl]=useState(false);
   const [dlInput,setDlInput]=useState("");
+  const [ruleDl,setRuleDl]=useState("m120");
   const now=useNow();
   const [filter,setFilterRaw]=useState(()=>{try{return sessionStorage.getItem("rsvpFilter")||"all";}catch(e){return "all";}});
   const [pinned,setPinned]=useState(()=>new Set()); // eben geänderte Spieler bleiben sichtbar, damit die Liste nicht springt
@@ -5959,7 +6060,10 @@ function RsvpInline({ev,players,rsvps,onSetRsvp,toast,deadlineMs,onSetDeadline,o
         <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
           {presets.map(p=><button key={p.k} onClick={()=>onPreset(ev,p)} style={small}>{p.label}</button>)}
         </div>
-        <div style={{fontSize:12,fontWeight:700,color:C.muted,margin:"10px 0 6px"}}>Oder genaue Zeit</div>
+        <div style={{fontSize:12,fontWeight:700,color:C.muted,margin:"10px 0 6px"}}>Oder frei relativ zum Termin</div>
+        <DeadlineRuleEditor value={ruleDl} onChange={setRuleDl} sample={ev} allowNone={false}/>
+        <Btn sm onClick={()=>{const ms=ruleDeadline(ruleDl,ev); if(ms==null){toast("Für diese Regel wird die Uhrzeit des Termins benötigt","warn");return;} setDl(ms);}}>Übernehmen</Btn>
+        <div style={{fontSize:12,fontWeight:700,color:C.muted,margin:"14px 0 6px"}}>Oder genaue Zeit</div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
           <input type="datetime-local" value={dlInput} onChange={e=>setDlInput(e.target.value)} style={{padding:"7px 10px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,color:C.text,background:C.card,fontFamily:"inherit"}}/>
           <Btn sm onClick={()=>{const ms=new Date(dlInput).getTime();if(!isNaN(ms))setDl(ms);}}>Speichern</Btn>
@@ -6016,7 +6120,7 @@ function RsvpEventHead({ev,more}) {
     <div style={{width:40,height:40,borderRadius:10,background:ev.type==="training"?"#eff6ff":"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{ev.type==="training"?"📅":"🏆"}</div>
     <div style={{flex:1,minWidth:0}}>
       <div style={{fontWeight:800,fontSize:14,color:C.text}}>{fmtDate(ev.date)}{ev.time?` · ${ev.time} Uhr`:""}</div>
-      <div style={{fontSize:12,color:C.muted,marginTop:2}}>{ev.type==="training"?"Training":ev.title}{ev.location?` · 📍 ${ev.location}`:""}</div>
+      <div style={{fontSize:12,color:C.muted,marginTop:2}}>{ev.type==="training"?"Training":ev.title}{ev.meetTime?` · 🕒 Treff ${ev.meetTime}`:""}{ev.location&&<> · <MapLink place={ev.location}/></>}</div>
     </div>
     {more&&<span style={{color:C.muted,fontSize:20,lineHeight:1,flexShrink:0}}>›</span>}
   </div>);
@@ -6044,7 +6148,8 @@ function EventDetailModal({ev,kids,players,rsvps,eventMeta={},onSave,onClose,onO
   return(<Modal title={isTr?"Training":ev.title} onClose={onClose}>
     <div>
       {row("📅","Wann",<>{longDate}<div style={{fontWeight:700,color:C.muted,fontSize:13}}>{when}</div></>)}
-      {row("📍","Wo",ev.location?<>{ev.location} <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(ev.location)}`} target="_blank" rel="noopener noreferrer" style={{color:C.primary,fontSize:12,fontWeight:700,textDecoration:"none",marginLeft:4}}>In Karten öffnen ↗</a></>:<span style={{color:C.muted,fontWeight:500}}>Ort noch nicht eingetragen</span>)}
+      {ev.meetTime&&row("🕒","Treffzeit",<>{ev.meetTime} Uhr{ev.time&&<span style={{fontWeight:600,color:C.muted}}> (Beginn {ev.time} Uhr)</span>}</>)}
+      {row("📍","Wo",ev.location?<><MapLink place={ev.location} label={ev.location}/> <MapLink place={ev.location} label="In Google Maps öffnen ↗" style={{fontSize:12,marginLeft:4}}/></>:<span style={{color:C.muted,fontWeight:500}}>Ort noch nicht eingetragen</span>)}
       {!isTr&&ev.hosting&&row("🏆","Turnier",ev.hosting==="other"?"Beim ausrichtenden Verein":"Wir sind Ausrichter")}
       {dl&&row(closed?"🔒":"⏰","Anmeldeschluss",<span style={{color:closed?"#b91c1c":"#92400e"}}>{closed?`Vorbei seit ${fmtDeadline(dl)} – Änderungen bitte direkt beim Trainer melden`:fmtDeadline(dl)}</span>)}
     </div>
@@ -6726,16 +6831,24 @@ export default function App() {
     sessions.forEach(x=>{
       if(!x.seriesId||x.isDraft||x.date<today||x.date>horizon) return;
       const slot=recurringSlots.find(sl=>sl.id===x.seriesId);
-      const preset=DEADLINE_PRESETS.find(p=>p.k===slot?.rsvpRule);
+      const rule=slot?.rsvpRule;
       const ev={key:"tr-"+x.id,type:"training",date:x.date,time:x.time||""};
       const cur=eventMeta[ev.key];
       if(cur?.manual) return;
-      const want=preset&&(!preset.needsTime||ev.time)?preset.calc(ev):null;
+      const want=rule?ruleDeadline(rule,ev):null;
       if(want!=null&&(!cur||cur.deadlineMs!==want)) ops.push(()=>setDeadline(ev,want,{auto:true,silent:true}));
       else if(want==null&&cur?.auto) ops.push(()=>setDeadline(ev,null,{silent:true}));
     });
     if(ops.length) Promise.all(ops.map(f=>f())).catch(e=>console.warn("deadline sync",e));
   },[sessions,recurringSlots,eventMeta,metaLoaded,isCoachReal,currentGroupId,user?.uid,sr,rsr]); // eslint-disable-line
+  // Einmalige Nachpflege: künftige Serientermine ohne Ort/Uhrzeit/Dauer bekommen die Werte ihres Wochentermins
+  useEffect(()=>{
+    if(!isCoachReal||!sr||!rsr) return;
+    const today=todayISO(); const slotOf=id=>(recurringSlots||[]).find(sl=>sl.id===id);
+    const gap=se=>{ const sl=se.seriesId&&slotOf(se.seriesId); return !!sl&&se.date>=today&&((!se.location&&sl.location)||(!se.time&&sl.time)||(!se.duration&&sl.duration)); };
+    if(!sessions.some(gap)) return;
+    setSessions(prev=>prev.map(se=>{ if(!gap(se)) return se; const sl=slotOf(se.seriesId); return {...se,location:se.location||sl.location||"",time:se.time||sl.time||"",duration:se.duration||sl.duration||60}; }));
+  },[sessions,recurringSlots,isCoachReal,sr,rsr]); // eslint-disable-line
   // Reduzierte, für Eltern lesbare Daten: nur Name/aktiv der Spieler und die Termine.
   // Alles Sensible (Stärken, Notizen, Kontakte, Kasse …) bleibt in den Trainer-Dokumenten.
   const [playersPub]=useCloudStorage("playersPublic",[], user, currentGroupId);
@@ -6858,7 +6971,22 @@ export default function App() {
   const saveKa=x=>{ setKassenbuch(upsert(x)); };
   const saveTodo=x=>{ setTodos(upsert(x)); };
   const saveMeeting=x=>{ setMeetings(upsert(x)); };
-  const saveSlot=x=>{ setRecurringSlots(upsert(x)); };
+  // Wochentermin speichern und Änderungen (Ort, Uhrzeit, Dauer, Treffzeit) auf künftige Termine der Serie übertragen –
+  // aber nur dort, wo der Termin noch den alten Serienwert (oder gar nichts) hat; einzeln geänderte Termine bleiben unberührt.
+  const saveSlot=x=>{
+    const old=(recurringSlots||[]).find(sl=>sl.id===x.id);
+    setRecurringSlots(upsert(x));
+    if(!old) return;
+    const today=todayISO(), F=["time","duration","location","meetTime"];
+    const changed=F.filter(f=>old[f]!==x[f]);
+    if(!changed.length) return;
+    setSessions(prev=>prev.map(se=>{
+      if(se.seriesId!==x.id||se.date<today) return se;
+      const n={...se}; let ch=false;
+      changed.forEach(f=>{ const cur=se[f]; if(cur===undefined||cur===null||cur===""||cur===old[f]){ if(x[f]===undefined) delete n[f]; else n[f]=x[f]; ch=true; } });
+      return ch?n:se;
+    }));
+  };
   const generateSessions=(newSessions)=>{
     if(!newSessions||!newSessions.length){ toast("Keine neuen Trainings im Zeitraum (evtl. schon vorhanden)"); return; }
     setSessions(prev=>[...prev,...newSessions]);
