@@ -2,11 +2,11 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
-// ⚠️  Muss dem Namen des GitHub-Repositories entsprechen (bestimmt die Adresse der App)
-const REPO_NAME = "Teammanager";
+// Die App liegt bei Firebase Hosting im Hauptpfad der Domain (teammanager-football.web.app)
+const BASE = "/";
 
 export default defineConfig({
-  base: `/${REPO_NAME}/`,
+  base: BASE,
   plugins: [
     react(),
     VitePWA({
@@ -20,8 +20,8 @@ export default defineConfig({
         background_color: "#f0f4f0",
         display: "standalone",
         orientation: "portrait",
-        start_url: `/${REPO_NAME}/`,
-        scope: `/${REPO_NAME}/`,
+        start_url: BASE,
+        scope: BASE,
         icons: [
           {
             src: "icon-192.png",
