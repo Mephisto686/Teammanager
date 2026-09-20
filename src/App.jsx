@@ -702,8 +702,8 @@ function useRsvps(groupId, user) {
 function buildRsvpEvents(sessions, tournaments) {
   const today = todayISO();
   return [
-    ...(sessions||[]).filter(s=>s.date>=today&&!s.isDraft).map(s=>({key:"tr-"+s.id,type:"training",date:s.date,time:s.time||"",title:"Training",location:s.location||""})),
-    ...(tournaments||[]).filter(t=>t.date>=today).map(t=>({key:"tn-"+t.id,type:"turnier",date:t.date,time:t.hosting==="other"?"":(t.startTime||""),title:t.name||"Turnier",location:t.location||""})),
+    ...(sessions||[]).filter(s=>s.date>=today&&!s.isDraft).map(s=>({key:"tr-"+s.id,type:"training",date:s.date,time:s.time||"",title:"Training",location:s.location||"",duration:s.duration||""})),
+    ...(tournaments||[]).filter(t=>t.date>=today).map(t=>({key:"tn-"+t.id,type:"turnier",date:t.date,time:t.hosting==="other"?"":(t.startTime||""),title:t.name||"Turnier",location:t.location||"",hosting:t.hosting||""})),
   ].sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));
 }
 
@@ -734,7 +734,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.42.0";
+const APP_VERSION = "3.43.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -1920,7 +1920,7 @@ function AddToSessionModal({playerIds,sessions,players,onSaveSession,onClose,toa
   </div>);
 }
 
-function TeamPage({teamsetCount=0,onOpenTeamsets,players,coaches,sessions,onSaveSession,onSavePlayer,onDeletePlayer,onSaveCoach,onDeleteCoach,toast,onAddToTraining,showStrength=true,readOnly=false,onlineUsers,currentUser,onGoHome,onGoBack}) {
+function TeamPage({members=[],teamsetCount=0,onOpenTeamsets,players,coaches,sessions,onSaveSession,onSavePlayer,onDeletePlayer,onSaveCoach,onDeleteCoach,toast,onAddToTraining,showStrength=true,readOnly=false,onlineUsers,currentUser,onGoHome,onGoBack}) {
   const [tab,setTab]=useState("players");
   const [modal,setModal]=useState(null);
   const [del,setDel]=useState(null);
@@ -1954,18 +1954,29 @@ function TeamPage({teamsetCount=0,onOpenTeamsets,players,coaches,sessions,onSave
 
   const [selPlayers,setSelPlayers]=useState([]);
   const [selCoaches,setSelCoaches]=useState([]);
+  // Trainer: alle Teammitglieder mit der Rolle "trainer" (App-Konten) zusätzlich zu den manuell angelegten Trainern
+  const normS=x=>(x||"").trim().toLowerCase();
+  const memberTrainers=(members||[]).filter(m=>memberRoles(m).includes("trainer")).sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+  const sameCoach=(c,m)=>(c.email&&normS(c.email)===normS(m.email))||(c.name&&normS(c.name)===normS(m.name));
+  const appOnlyTrainers=memberTrainers.filter(m=>!coaches.some(c=>sameCoach(c,m)));
+  const coachAppAccount=c=>memberTrainers.some(m=>sameCoach(c,m));
+  const coachCount=coaches.length+appOnlyTrainers.length;
+  // Kontakte: Eltern mit App-Konto samt verknüpften Kindern
+  const parentAccounts=(members||[]).filter(m=>memberRoles(m).includes("eltern")).sort((a,b)=>(a.name||"").localeCompare(b.name||""))
+    .map(m=>({...m,kids:(m.childIds||[]).map(id=>players.find(p=>p.id===id)).filter(Boolean)}))
+    .filter(m=>{const q=normS(kontakteSearch); return !q||normS(m.name).includes(q)||normS(m.email).includes(q)||m.kids.some(k=>normS(k.name).includes(q));});
   const grp={4:[],3:[],2:[],1:[]};players.forEach(p=>grp[p.strength]?.push(p));
   const tb=(k,l,n)=><button onClick={()=>setTab(k)} style={{padding:"8px 20px",borderRadius:8,border:"none",cursor:"pointer",fontWeight:700,fontSize:14,fontFamily:"inherit",background:tab===k?C.primary:"transparent",color:tab===k?"white":C.muted}}>{l} <span style={{fontSize:12,opacity:.7}}>({n})</span></button>;
   const totalSel=selPlayers.length+selCoaches.length;
   return(<div>
-    <PageHeader title="Team" sub={`${players.filter(p=>p.active).length} aktive Spieler · ${coaches.filter(c=>c.active).length} Trainer`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
+    <PageHeader title="Team" sub={`${players.filter(p=>p.active).length} aktive Spieler · ${coaches.filter(c=>c.active).length+appOnlyTrainers.length} Trainer`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
     <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
       {tab==="players"&&<><Btn onClick={()=>playerImportRef.current.click()} variant="secondary" sm><Upload size={14}/> Spieler importieren</Btn><input ref={playerImportRef} type="file" accept=".json,.csv" onChange={async e=>{const f=e.target.files?.[0];if(!f)return;if(f.name.endsWith(".csv")){const p=parseCsvPlayers(await readText(f));p.forEach(x=>onSavePlayer(x));toast(`${p.length} Spieler importiert`);} else handleImportPlayers(e); e.target.value="";}} style={{display:"none"}}/></>}
       {tab==="coaches"&&<><Btn onClick={()=>coachImportRef.current.click()} variant="secondary" sm><Upload size={14}/> Trainer importieren</Btn><input ref={coachImportRef} type="file" accept=".json" onChange={handleImportCoaches} style={{display:"none"}}/></>}
       {(tab==="players"||tab==="coaches")&&<Btn onClick={()=>setModal({type:tab==="players"?"pf":"cf",data:null})}><Plus size={16}/> {tab==="players"?"Spieler":"Trainer"} hinzufügen</Btn>}
       {onOpenTeamsets&&<Btn variant="secondary" sm onClick={onOpenTeamsets}>🔀 Aufstellungen ({teamsetCount})</Btn>}
     </div>
-    <div style={{display:"flex",gap:4,background:"#f1f5f9",borderRadius:10,padding:4,marginBottom:12,width:"fit-content"}}>{tb("players","Spieler",players.length)}{tb("coaches","Trainer",coaches.length)}{tb("kontakte","Kontakte",players.filter(p=>(p.contacts||[]).length>0).length)}</div>
+    <div style={{display:"flex",gap:4,background:"#f1f5f9",borderRadius:10,padding:4,marginBottom:12,width:"fit-content"}}>{tb("players","Spieler",players.length)}{tb("coaches","Trainer",coachCount)}{tb("kontakte","Kontakte",players.filter(p=>(p.contacts||[]).length>0).length+(members||[]).filter(m=>memberRoles(m).includes("eltern")).length)}</div>
     {totalSel>0&&<div style={{borderRadius:10,border:`1.5px solid ${C.primary}`,background:C.accentL,padding:"10px 14px",marginBottom:12}}>
       <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
         <span style={{fontWeight:800,color:C.primary,fontSize:14,flex:1}}>✓ {selPlayers.length>0?`${selPlayers.length} Spieler`:""}{selPlayers.length>0&&selCoaches.length>0?" + ":""}{selCoaches.length>0?`${selCoaches.length} Trainer`:""} ausgewählt</span>
@@ -1983,17 +1994,22 @@ function TeamPage({teamsetCount=0,onOpenTeamsets,players,coaches,sessions,onSave
         onDel={!readOnly&&onDeletePlayer?p=>setDel({type:"player",id:p.id,name:p.name}):null}
         showStrength={showStrength}/>
     )}
-    {tab==="coaches"&&(coaches.length===0?<Empty icon="🧑‍🏫" title="Noch keine Trainer" onAdd={()=>setModal({type:"cf",data:null})} addLabel="Ersten Trainer anlegen"/>:
+    {tab==="coaches"&&(coachCount===0?<Empty icon="🧑‍🏫" title="Noch keine Trainer" onAdd={()=>setModal({type:"cf",data:null})} addLabel="Ersten Trainer anlegen"/>:
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:12}}>
         {coaches.map(c=>{const isSel=selCoaches.includes(c.id);return(<div key={c.id} style={{background:C.card,borderRadius:10,border:`2px solid ${isSel?C.primary:C.border}`,padding:"14px 16px",opacity:c.active?1:.6,cursor:"pointer"}} onClick={()=>setSelCoaches(prev=>prev.includes(c.id)?prev.filter(x=>x!==c.id):[...prev,c.id])}>
           <div style={{display:"flex",justifyContent:"space-between"}}>
             <div style={{display:"flex",alignItems:"flex-start",gap:8}}>
               <div style={{color:isSel?C.primary:C.muted,marginTop:2}}>{isSel?<CheckSquare size={16}/>:<Square size={16}/>}</div>
-              <div><div style={{fontWeight:800,fontSize:15,color:C.text}}>{c.name}</div><div style={{fontSize:12,color:C.muted}}>{ROLES[c.role]}</div>{c.phone&&<div style={{fontSize:12,color:C.muted}}>{c.phone}</div>}</div>
+              <div><div style={{fontWeight:800,fontSize:15,color:C.text}}>{c.name}</div><div style={{fontSize:12,color:C.muted}}>{ROLES[c.role]}{coachAppAccount(c)&&" · 📱 App-Konto"}</div>{c.phone&&<div style={{fontSize:12,color:C.muted}}>{c.phone}</div>}</div>
             </div>
             <div style={{display:"flex",gap:4}} onClick={e=>e.stopPropagation()}><button onClick={()=>setModal({type:"cf",data:c})} style={{background:"none",border:"none",cursor:"pointer",color:C.muted,padding:4}}><Edit2 size={14}/></button><button onClick={()=>setDel({type:"coach",id:c.id,name:c.name})} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",padding:4}}><Trash2 size={14}/></button></div>
           </div>
         </div>);})}
+        {appOnlyTrainers.map(m=><div key={"m"+m.uid} style={{background:C.card,borderRadius:10,border:`2px solid ${C.border}`,padding:"14px 16px"}}>
+          <div style={{fontWeight:800,fontSize:15,color:C.text}}>{m.name||m.email}</div>
+          <div style={{fontSize:12,color:C.muted}}>{memberRoles(m).includes("admin")?"Trainer · Admin":"Trainer"} · 📱 App-Konto</div>
+          {m.email&&<div style={{fontSize:12,marginTop:2,wordBreak:"break-all"}}><a href={`mailto:${m.email}`} style={{color:C.primary,textDecoration:"none"}}>{m.email}</a></div>}
+        </div>)}
       </div>)}
     {tab==="kontakte"&&(<div>
       <div style={{position:"relative",marginBottom:10}}>
@@ -2017,6 +2033,21 @@ function TeamPage({teamsetCount=0,onOpenTeamsets,players,coaches,sessions,onSave
           return <button key={v} onClick={()=>setKontakteFilter(f=>({...f,pass:on?"":v}))} style={{padding:"4px 11px",borderRadius:20,border:`1.5px solid ${on?"#1d4ed8":C.border}`,background:on?"#dbeafe":"white",color:on?"#1d4ed8":C.muted,cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:12}}>{l}</button>;
         })}
       </div>
+      {parentAccounts.length>0&&<div style={{marginBottom:18}}>
+        <div style={{fontWeight:800,fontSize:12,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>👪 Eltern mit App-Konto ({parentAccounts.length})</div>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {parentAccounts.map(m=><div key={m.uid} style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
+            <div style={{width:36,height:36,borderRadius:"50%",background:C.accentL,color:C.primary,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,fontSize:15,flexShrink:0}}>{(m.name||m.email||"?")[0].toUpperCase()}</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:800,fontSize:14,color:C.text}}>{m.name||<span style={{color:C.muted,fontStyle:"italic",fontWeight:600}}>Kein Name angegeben</span>}</div>
+              {m.email&&<div style={{fontSize:12,marginTop:1,wordBreak:"break-all"}}><a href={`mailto:${m.email}`} style={{color:C.primary,textDecoration:"none"}}>{m.email}</a></div>}
+              <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:6}}>
+                {m.kids.length>0?m.kids.map(k=><span key={k.id} style={{fontSize:11,fontWeight:700,padding:"2px 9px",borderRadius:20,background:C.accentL,color:C.primary}}>👶 {k.name}</span>):<span style={{fontSize:11,color:C.muted,fontStyle:"italic"}}>Kein Kind verknüpft</span>}
+              </div>
+            </div>
+          </div>)}
+        </div>
+      </div>}
       {players.length===0?<Empty icon="👥" title="Noch keine Spieler" sub="Lege zuerst Spieler im Tab ‚Spieler' an." onAdd={()=>setTab("players")} addLabel="Zu Spieler"/>:
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           {players.filter(p=>{
@@ -5468,6 +5499,24 @@ function StartTeaser({icon,title,sub,badge,onClick}) {
   </button>);
 }
 
+// Termin-Karte der Trainer-Startseite (gleicher Stil wie bei Eltern), mit Planungsstatus und Rückmeldungen
+function StartEventCard({icon,iconBg,date,time,sub,chip,chipColor,counts,onClick}) {
+  return(<div onClick={onClick} style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"10px 12px",marginBottom:10,cursor:onClick?"pointer":"default"}}>
+    <div style={{display:"flex",alignItems:"center",gap:10}}>
+      <div style={{width:40,height:40,borderRadius:10,background:iconBg||"#eff6ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{icon}</div>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontWeight:800,fontSize:14,color:C.text}}>{fmtDate(date)}{time?` · ${time} Uhr`:""}</div>
+        <div style={{fontSize:12,color:C.muted,marginTop:2}}>{sub}</div>
+      </div>
+      {chip&&<span style={{fontSize:11,fontWeight:800,padding:"3px 9px",borderRadius:20,background:chipColor?.bg||"#f1f5f9",color:chipColor?.text||C.muted,whiteSpace:"nowrap",flexShrink:0}}>{chip}</span>}
+      <span style={{color:C.muted,fontSize:20,lineHeight:1,flexShrink:0}}>›</span>
+    </div>
+    {counts&&<div style={{display:"flex",gap:14,fontSize:12,fontWeight:800,marginTop:8}}>
+      <span style={{color:"#16a34a"}}>✅ {counts.yes}</span><span style={{color:"#b45309"}}>🤔 {counts.maybe}</span><span style={{color:"#dc2626"}}>❌ {counts.no}</span><span style={{color:C.muted}}>⏳ {counts.open}</span>
+    </div>}
+  </div>);
+}
+
 function NextCard({icon,label,title,sub,status,statusColor,onClick}) {
   return(<div onClick={onClick} style={{flex:"0 0 auto",width:196,background:C.card,borderRadius:14,border:`1.5px solid ${C.border}`,padding:"14px 16px",cursor:onClick?"pointer":"default",position:"relative"}}>
     {status&&<span style={{position:"absolute",top:10,right:10,fontSize:9,fontWeight:800,padding:"2px 7px",borderRadius:20,background:statusColor?.bg||"#f1f5f9",color:statusColor?.text||C.muted,whiteSpace:"nowrap"}}>{status}</span>}
@@ -5488,7 +5537,7 @@ function StatBox({icon,value,label}) {
   </div>);
 }
 
-function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets,kassenbuch,exercises,role,openRsvps,currentUser,onlineUsers,onNavigate,onOpenLibraryCategory,onOpenOrgaItem,onOpenCalendarItem,onOpenTournament,onSaveExercise,onDeleteExercise,onGoBack}) {
+function StartPage({rsvps,players,coaches,sessions,tournaments,todos,meetings,teamsets,kassenbuch,exercises,role,openRsvps,currentUser,onlineUsers,onNavigate,onOpenLibraryCategory,onOpenOrgaItem,onOpenCalendarItem,onOpenTournament,onSaveExercise,onDeleteExercise,onGoBack}) {
   const [exModal,setExModal]=useState(null);
   const today=todayISO();
   const activePlayers=(players||[]).filter(p=>p.active);
@@ -5501,11 +5550,12 @@ function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets
   const hour=new Date().getHours();
   const greeting=hour<11?"Guten Morgen":hour<18?"Hallo":"Guten Abend";
 
+  const rsvpCount=key=>{ const c={yes:0,maybe:0,no:0,open:0}; activePlayers.forEach(p=>{const st=rsvps?.[rsvpKey(key,p.id)]?.status; if(st==="yes")c.yes++; else if(st==="maybe")c.maybe++; else if(st==="no")c.no++; else c.open++;}); return c; };
   const nextItems=[
-    ...(sessions||[]).filter(s=>s.date>=today&&!s.isDraft).map(s=>({date:s.date,icon:"📅",label:"Training",title:relDateLabel(s.date),sub:[s.location,s.duration?`${s.duration} Min`:null].filter(Boolean).join(" · ")||undefined,status:isSessionPlanned(s)?"✅ Geplant":"🕒 Ungeplant",statusColor:isSessionPlanned(s)?{bg:"#dcfce7",text:"#16a34a"}:{bg:"#fef3c7",text:"#b45309"},onClick:()=>onOpenCalendarItem?onOpenCalendarItem({type:"training",id:s.id}):onNavigate("training")})),
-    ...(tournaments||[]).filter(t=>t.date>=today).map(t=>({date:t.date,icon:"🏆",label:"Turnier",title:t.name||"Turnier",sub:relDateLabel(t.date),onClick:()=>onOpenTournament?onOpenTournament(t.id):onNavigate("turnier")})),
-    ...(meetings||[]).filter(m=>m.date>=today).map(m=>({date:m.date,icon:"🧑‍🏫",label:"Trainertreff",title:m.title||"Trainertreff",sub:relDateLabel(m.date),onClick:()=>onOpenCalendarItem?onOpenCalendarItem({type:"meeting",id:m.id}):onNavigate("calendar")})),
-  ].sort((a,b)=>a.date.localeCompare(b.date)).slice(0,10);
+    ...(sessions||[]).filter(s=>s.date>=today&&!s.isDraft).map(s=>({date:s.date,time:s.time||"",icon:"📅",iconBg:"#eff6ff",sub:`Training${s.location?` · 📍 ${s.location}`:""}${s.duration?` · ⏱ ${s.duration} Min`:""}`,chip:isSessionPlanned(s)?"✅ Geplant":"🕒 Ungeplant",chipColor:isSessionPlanned(s)?{bg:"#dcfce7",text:"#16a34a"}:{bg:"#fef3c7",text:"#b45309"},counts:rsvps?rsvpCount("tr-"+s.id):null,onClick:()=>onOpenCalendarItem?onOpenCalendarItem({type:"training",id:s.id}):onNavigate("training")})),
+    ...(tournaments||[]).filter(t=>t.date>=today).map(t=>({date:t.date,time:t.hosting==="other"?"":(t.startTime||""),icon:"🏆",iconBg:"#f0fdf4",sub:`${t.name||"Turnier"}${t.location?` · 📍 ${t.location}`:""}`,counts:rsvps?rsvpCount("tn-"+t.id):null,onClick:()=>onOpenTournament?onOpenTournament(t.id):onNavigate("turnier")})),
+    ...(meetings||[]).filter(m=>m.date>=today).map(m=>({date:m.date,time:m.time||"",icon:"🧑‍🏫",iconBg:"#faf5ff",sub:`Trainertreff${m.title?` · ${m.title}`:""}`,onClick:()=>onOpenCalendarItem?onOpenCalendarItem({type:"meeting",id:m.id}):onNavigate("calendar")})),
+  ].sort((a,b)=>(a.date+(a.time||"")).localeCompare(b.date+(b.time||""))).slice(0,5);
 
   const teasers=[
     can(role,"calendar")&&{icon:"🗓",title:"Termine",sub:"Alle Termine",onClick:()=>onNavigate("calendar")},
@@ -5541,12 +5591,10 @@ function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets
 
     {nextItems.length>0&&<div style={{marginBottom:24}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:10}}>
-        <div style={{fontWeight:800,fontSize:15,color:C.text}}>Als Nächstes</div>
+        <div style={{fontWeight:800,fontSize:15,color:C.text}}>Termine</div>
         {can(role,"calendar")&&<button onClick={()=>onNavigate("calendar")} style={{background:"none",border:"none",color:C.primary,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>Alle anzeigen →</button>}
       </div>
-      <div className="tm-hscroll" style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:2}}>
-        {nextItems.map((it,i)=><NextCard key={i} {...it}/>)}
-      </div>
+      {nextItems.map((it,i)=><StartEventCard key={i} {...it}/>)}
     </div>}
 
     {can(role,"orga")&&openTodos.length>0&&<div style={{marginBottom:24}}>
@@ -5733,8 +5781,9 @@ function RsvpIconButtons({st,locked,onSet}) {
   </div>);
 }
 
-function ParentStartPage({role,currentUser,events,myKids,rsvps,eventMeta={},openRsvps,onNavigate,onSetRsvp,toast}) {
+function ParentStartPage({role,currentUser,events,players=[],myKids,rsvps,eventMeta={},openRsvps,onNavigate,onSetRsvp,toast}) {
   const now=useNow();
+  const [detail,setDetail]=useState(null);
   // Kind, für das auf dieser Seite geantwortet wird (bei mehreren Kindern umschaltbar)
   const [selId,setSelId]=useState(()=>{try{return sessionStorage.getItem("startKid");}catch(e){return null;}});
   const kid=myKids.find(k=>k.id===selId)||myKids[0];
@@ -5771,7 +5820,10 @@ function ParentStartPage({role,currentUser,events,myKids,rsvps,eventMeta={},open
       <StartTeaser icon="🗓" title="Termine" sub={openRsvps>0?`${openRsvps} offen`:"Zu- und Absagen"} badge={openRsvps>0?openRsvps:null} onClick={()=>onNavigate("calendar")}/>
     </div>
 
-    <div style={{fontWeight:800,fontSize:15,color:C.text,marginBottom:8}}>Als Nächstes</div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
+      <div style={{fontWeight:800,fontSize:15,color:C.text}}>Termine</div>
+      <button onClick={()=>onNavigate("calendar")} style={{background:"none",border:"none",color:C.primary,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>Alle anzeigen →</button>
+    </div>
     {kid&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
       {myKids.length>1
         ?myKids.map(k=>{const on=k.id===kid.id;return <button key={k.id} onClick={()=>pickKid(k.id)} style={{padding:"6px 14px",borderRadius:20,border:`2px solid ${on?C.primary:C.border}`,background:on?C.accentL:C.card,color:on?C.primary:C.muted,fontWeight:800,fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>{role==="spieler"?"⚽":"👶"} {k.name}</button>;})
@@ -5783,12 +5835,13 @@ function ParentStartPage({role,currentUser,events,myKids,rsvps,eventMeta={},open
       const dl=eventMeta?.[ev.key]?.deadlineMs||null, closed=!!dl&&now>dl;
       return(<div key={ev.key} style={{...box,marginBottom:10,padding:"10px 12px"}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <div onClick={()=>onNavigate("calendar")} style={{flex:1,minWidth:0,cursor:"pointer"}}><RsvpEventHead ev={ev}/></div>
+          <div onClick={()=>setDetail(ev)} style={{flex:1,minWidth:0,cursor:"pointer"}}><RsvpEventHead ev={ev} more/></div>
           {kid&&<RsvpIconButtons st={st} locked={closed} onSet={status=>save(ev,status)}/>}
         </div>
         {kid&&dl&&<div style={{marginTop:6,fontSize:11,fontWeight:700,color:closed?"#b91c1c":"#92400e"}}>{closed?`🔒 Anmeldeschluss war ${fmtDeadline(dl)}`:`⏰ Zu-/Absage möglich bis ${fmtDeadline(dl)}`}</div>}
       </div>);
     })}
+    {detail&&<EventDetailModal ev={detail} kids={myKids} players={players} rsvps={rsvps} eventMeta={eventMeta} onSave={onSetRsvp} toast={toast} onClose={()=>setDetail(null)} onOpenAll={()=>{setDetail(null);onNavigate("calendar");}}/>}
   </div>);
 }
 
@@ -5895,14 +5948,62 @@ function ActivityPage({entries,onlineUsers,currentUser,onGoHome,onGoBack}) {
 }
 
 // ── ANMELDUNG: Seite ──────────────────────────────────────────────
-function RsvpEventHead({ev}) {
+function RsvpEventHead({ev,more}) {
   return(<div style={{display:"flex",alignItems:"center",gap:10}}>
     <div style={{width:40,height:40,borderRadius:10,background:ev.type==="training"?"#eff6ff":"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{ev.type==="training"?"📅":"🏆"}</div>
     <div style={{flex:1,minWidth:0}}>
       <div style={{fontWeight:800,fontSize:14,color:C.text}}>{fmtDate(ev.date)}{ev.time?` · ${ev.time} Uhr`:""}</div>
       <div style={{fontSize:12,color:C.muted,marginTop:2}}>{ev.type==="training"?"Training":ev.title}{ev.location?` · 📍 ${ev.location}`:""}</div>
     </div>
+    {more&&<span style={{color:C.muted,fontSize:20,lineHeight:1,flexShrink:0}}>›</span>}
   </div>);
+}
+
+// Detailansicht eines Termins (Eltern/Spieler): wann, wo, Anmeldung und wer kommt
+function EventDetailModal({ev,kids,players,rsvps,eventMeta={},onSave,onClose,onOpenAll,toast}) {
+  const now=useNow();
+  const dl=eventMeta?.[ev.key]?.deadlineMs||null, closed=!!dl&&now>dl;
+  const isTr=ev.type==="training";
+  const longDate=new Date(ev.date+"T12:00:00").toLocaleDateString("de-DE",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
+  const endTime=(()=>{ if(!ev.time||!ev.duration) return ""; const [h,m]=ev.time.split(":").map(Number); const t=h*60+m+Number(ev.duration); if(!isFinite(t)) return ""; return `${String(Math.floor(t/60)%24).padStart(2,"0")}:${String(t%60).padStart(2,"0")}`; })();
+  const when=ev.time?`${ev.time}${endTime?` – ${endTime}`:""} Uhr${ev.duration?` (${ev.duration} Min)`:""}`:"Uhrzeit noch offen";
+  const active=(players||[]).filter(p=>p.active!==false).sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+  const stOf=p=>rsvps[rsvpKey(ev.key,p.id)]?.status||null;
+  const yesL=active.filter(p=>stOf(p)==="yes"), maybeL=active.filter(p=>stOf(p)==="maybe"), noL=active.filter(p=>stOf(p)==="no"), openL=active.filter(p=>!stOf(p));
+  const save=async(e,pid,status,note)=>{
+    try{ await onSave(e,pid,status,note); }
+    catch(err){ console.warn("rsvp",err); toast&&toast("Nach dem Anmeldeschluss oder ohne Berechtigung nicht möglich – bitte den Trainer fragen","warn"); }
+  };
+  const row=(icon,label,children)=><div style={{display:"flex",gap:12,padding:"9px 0",borderBottom:`1px solid ${C.border}`}}>
+    <div style={{width:28,fontSize:18,textAlign:"center",flexShrink:0}}>{icon}</div>
+    <div style={{flex:1,minWidth:0}}><div style={{fontSize:11,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.5}}>{label}</div><div style={{fontSize:14,fontWeight:600,color:C.text,marginTop:1}}>{children}</div></div>
+  </div>;
+  return(<Modal title={isTr?"Training":ev.title} onClose={onClose}>
+    <div>
+      {row("📅","Wann",<>{longDate}<div style={{fontWeight:700,color:C.muted,fontSize:13}}>{when}</div></>)}
+      {row("📍","Wo",ev.location?<>{ev.location} <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(ev.location)}`} target="_blank" rel="noopener noreferrer" style={{color:C.primary,fontSize:12,fontWeight:700,textDecoration:"none",marginLeft:4}}>In Karten öffnen ↗</a></>:<span style={{color:C.muted,fontWeight:500}}>Ort noch nicht eingetragen</span>)}
+      {!isTr&&ev.hosting&&row("🏆","Turnier",ev.hosting==="other"?"Beim ausrichtenden Verein":"Wir sind Ausrichter")}
+      {dl&&row(closed?"🔒":"⏰","Anmeldeschluss",<span style={{color:closed?"#b91c1c":"#92400e"}}>{closed?`Vorbei seit ${fmtDeadline(dl)} – Änderungen bitte direkt beim Trainer melden`:fmtDeadline(dl)}</span>)}
+    </div>
+    {kids.length>0&&<div style={{marginTop:14}}>
+      <div style={{fontWeight:800,fontSize:13,color:C.text,marginBottom:2}}>Anmeldung</div>
+      {kids.map(k=><RsvpKidRow key={k.id} kid={k} ev={ev} rsvp={rsvps[rsvpKey(ev.key,k.id)]} onSave={save} showName={kids.length>1} locked={closed}/>)}
+    </div>}
+    <div style={{marginTop:14,paddingTop:12,borderTop:`1px solid ${C.border}`}}>
+      <div style={{display:"flex",gap:14,fontSize:13,fontWeight:800,marginBottom:8}}>
+        <span style={{color:"#16a34a"}}>✅ {yesL.length}</span><span style={{color:"#b45309"}}>🤔 {maybeL.length}</span><span style={{color:"#dc2626"}}>❌ {noL.length}</span><span style={{color:C.muted}}>⏳ {openL.length}</span>
+        <span style={{marginLeft:"auto",color:C.muted,fontWeight:600,fontSize:12}}>Wer kommt?</span>
+      </div>
+      <div style={{fontSize:13,color:C.text,lineHeight:1.6}}>
+        {yesL.length>0&&<div><b style={{color:"#16a34a"}}>Dabei:</b> {yesL.map(p=>p.name).join(", ")}</div>}
+        {maybeL.length>0&&<div><b style={{color:"#b45309"}}>Unsicher:</b> {maybeL.map(p=>p.name).join(", ")}</div>}
+        {noL.length>0&&<div><b style={{color:"#dc2626"}}>Nicht dabei:</b> {noL.map(p=>p.name).join(", ")}</div>}
+        {openL.length>0&&<div><b style={{color:C.muted}}>Noch offen:</b> {openL.map(p=>p.name).join(", ")}</div>}
+        {active.length===0&&<div style={{color:C.muted}}>Noch keine Spieler eingetragen.</div>}
+      </div>
+    </div>
+    {onOpenAll&&<div style={{marginTop:16,textAlign:"right"}}><Btn sm variant="secondary" onClick={onOpenAll}>Alle Termine →</Btn></div>}
+  </Modal>);
 }
 
 function RsvpKidRow({kid,ev,rsvp,onSave,compact,showName=true,locked=false}) {
@@ -5927,6 +6028,7 @@ function RsvpPage({role,events,players,rsvps,eventMeta={},onSetRsvp,myKids,toast
   // Elternansicht "Termine": eigene Kinder zu-/absagen, andere nur ansehen
   const [showAll,setShowAll] = useState(false);
   const [openKey,setOpenKey] = useState(null);
+  const [detailEv,setDetailEv] = useState(null);
   const now = useNow();
   const horizon = addDaysISO(todayISO(),RSVP_HORIZON_DAYS);
   const shown = showAll ? events : events.filter(e=>e.date<=horizon);
@@ -5954,7 +6056,7 @@ function RsvpPage({role,events,players,rsvps,eventMeta={},onSetRsvp,myKids,toast
       const dl=eventMeta?.[ev.key]?.deadlineMs||null;
       const closed=!!dl&&now>dl;
       return(<div key={ev.key} style={{background:C.card,borderRadius:12,border:`1.5px solid ${open>0&&!closed?"#fde047":C.border}`,padding:"12px 16px",marginBottom:10}}>
-        <RsvpEventHead ev={ev}/>
+        <div onClick={()=>setDetailEv(ev)} style={{cursor:"pointer"}}><RsvpEventHead ev={ev} more/></div>
         {dl&&<div style={{marginTop:8,fontSize:12,fontWeight:700,padding:"6px 10px",borderRadius:8,background:closed?"#fee2e2":"#fef3c7",color:closed?"#b91c1c":"#92400e"}}>{closed?`🔒 Anmeldeschluss war ${fmtDeadline(dl)} – Änderungen bitte direkt beim Trainer melden`:`⏰ Zu-/Absage möglich bis ${fmtDeadline(dl)}`}</div>}
         <div style={{marginTop:6}}>
           {myKids.map(k=><RsvpKidRow key={k.id} kid={k} ev={ev} rsvp={rsvps[rsvpKey(ev.key,k.id)]} onSave={save} showName={myKids.length>1} locked={closed}/>)}
@@ -5975,6 +6077,7 @@ function RsvpPage({role,events,players,rsvps,eventMeta={},onSetRsvp,myKids,toast
       </div>);
     })}
     {hidden>0&&<div style={{textAlign:"center",marginTop:6}}><Btn sm variant="secondary" onClick={()=>setShowAll(true)}>{hidden} weitere Termine anzeigen</Btn></div>}
+    {detailEv&&<EventDetailModal ev={detailEv} kids={myKids} players={players} rsvps={rsvps} eventMeta={eventMeta} onSave={onSetRsvp} toast={toast} onClose={()=>setDetailEv(null)}/>}
   </div>);
 }
 
@@ -6486,14 +6589,22 @@ export default function App() {
   const myRoles = memberSrc ? memberRoles(memberSrc) : (isGlobalAdmin ? ["admin"] : []);
   const realRole = memberSrc ? primaryRole(myRoles) : (isGlobalAdmin ? "admin" : null);
   const isCoachReal = realRole==="admin" || realRole==="trainer"; // echte Rechte, unabhängig von der gewählten Ansicht
+  // Alle Mitglieder des Teams (für Trainer- und Kontakte-Liste)
+  const [teamMembers,setTeamMembers]=useState([]);
+  useEffect(()=>{
+    if(!fbDb||!currentGroupId||!isCoachReal){ setTeamMembers([]); return; }
+    const unsub=onSnapshot(collection(fbDb,"groups",currentGroupId,"members"),snap=>setTeamMembers(snap.docs.map(d=>d.data())),()=>{});
+    return unsub;
+  },[currentGroupId,isCoachReal]);
   const [viewRoleRaw,setViewRoleRaw]=useState(null);
   useEffect(()=>{ setViewRoleRaw(user?.uid&&currentGroupId?(localStorage.getItem(`viewRole_${user.uid}_${currentGroupId}`)||null):null); },[user?.uid,currentGroupId]);
   const hasChildLink = (myMember?.childIds||[]).length>0;
-  // Wählbare Ansichten = die eigenen Rollen im Team. Admins können zusätzlich alle Ansichten zur Vorschau nutzen,
-  // Trainer mit verknüpftem Kind bekommen die Elternansicht dazu.
-  let roleViews = ROLE_ORDER.filter(r=>myRoles.includes(r));
-  if(realRole==="admin") roleViews=["admin","trainer","eltern","spieler"];
-  else if(realRole==="trainer"&&hasChildLink&&!roleViews.some(isFamily)) roleViews=[...roleViews,"eltern"];
+  // Wählbare Ansichten = nur die Rollen, die man im Team wirklich hat. Ausnahmen: Admins haben alle Trainer-Rechte
+  // (Trainer-Ansicht wählbar); Admin/Trainer mit verknüpftem Kind bekommen die Elternansicht dazu.
+  const viewSet = new Set(myRoles);
+  if(viewSet.has("admin")) viewSet.add("trainer");
+  if((realRole==="admin"||realRole==="trainer")&&hasChildLink&&!myRoles.some(isFamily)) viewSet.add("eltern");
+  let roleViews = ROLE_ORDER.filter(r=>viewSet.has(r));
   if(roleViews.length<2) roleViews=[];
   // Effektive Rolle = gewählte Ansicht (nur wenn erlaubt), sonst die echte Rolle
   const role = roleViews.includes(viewRoleRaw) ? viewRoleRaw : realRole;
@@ -6723,10 +6834,10 @@ export default function App() {
     <Nav page={page} setPage={setPage} onLogout={logout} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0,openRsvps}}/>
     <main className="gm" style={{display:"block",zoom:prefs.fontScale||1}}>
       {needsChildSetup?<ChildSetupPage role={role} players={rsvpPlayers} groupId={currentGroupId} toast={toast} onSkip={()=>{try{localStorage.setItem(`childSkip_${user.uid}_${currentGroupId}`,"1");}catch(e){} setChildSkip(true);}}/>:<>
-      {page==="start"&&isFamily(role)&&<ParentStartPage role={role} currentUser={user} events={rsvpEvents} myKids={myKids} rsvps={rsvps} eventMeta={eventMeta} openRsvps={openRsvps} onNavigate={setPage} onSetRsvp={setRsvp} toast={toast}/>}
-      {page==="start"&&!isFamily(role)&&<StartPage players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} todos={todos} meetings={meetings} teamsets={teamsets} kassenbuch={kassenbuch} exercises={exercises} role={role} openRsvps={openRsvps} currentUser={user} onlineUsers={onlineUsers} onNavigate={setPage} onOpenLibraryCategory={cat=>{setPendingLibraryCat(cat);setPage("library");}} onOpenOrgaItem={target=>{setPendingOrgaTarget(target);setPage("orga");}} onOpenCalendarItem={target=>{setPendingCalendarTarget(target);setPage("calendar");}} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} onSaveExercise={saveEx} onDeleteExercise={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="start"&&isFamily(role)&&<ParentStartPage role={role} currentUser={user} events={rsvpEvents} players={rsvpPlayers} myKids={myKids} rsvps={rsvps} eventMeta={eventMeta} openRsvps={openRsvps} onNavigate={setPage} onSetRsvp={setRsvp} toast={toast}/>}
+      {page==="start"&&!isFamily(role)&&<StartPage rsvps={rsvps} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} todos={todos} meetings={meetings} teamsets={teamsets} kassenbuch={kassenbuch} exercises={exercises} role={role} openRsvps={openRsvps} currentUser={user} onlineUsers={onlineUsers} onNavigate={setPage} onOpenLibraryCategory={cat=>{setPendingLibraryCat(cat);setPage("library");}} onOpenOrgaItem={target=>{setPendingOrgaTarget(target);setPage("orga");}} onOpenCalendarItem={target=>{setPendingCalendarTarget(target);setPage("calendar");}} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} onSaveExercise={saveEx} onDeleteExercise={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="library"  &&<LibraryPage  exercises={exercises} onSave={saveEx} onDelete={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} apiKey={apiKey} toast={toast} onlineUsers={onlineUsers} currentUser={user} initialCategory={pendingLibraryCat} onConsumeInitialCategory={()=>setPendingLibraryCat(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
-      {page==="team"     &&<TeamPage     teamsetCount={teamsets.length} onOpenTeamsets={can(role,"teamplaner")?()=>setPage("teamplaner"):null} players={players} coaches={coaches} sessions={sessions} onSaveSession={saveSe} onSavePlayer={can(role,"editAnything")?savePl:null} onDeletePlayer={can(role,"editAnything")?id=>{const i=players.find(p=>p.id===id);setPlayers(prev=>prev.filter(p=>p.id!==id));showUndo("Spieler",i,()=>setPlayers(prev=>[i,...prev]));}:null} onSaveCoach={can(role,"editAnything")?saveCo:null} onDeleteCoach={can(role,"editAnything")?id=>{const i=coaches.find(c=>c.id===id);setCoaches(prev=>prev.filter(c=>c.id!==id));showUndo("Trainer",i,()=>setCoaches(prev=>[i,...prev]));}:null} toast={toast} showStrength={can(role,"seeStrength")} readOnly={!can(role,"editAnything")} onAddToTraining={can(role,"editAnything")?({playerIds,coachIds,kids,coachCount})=>{setPendingSetup({playerIds,coachIds,kids:kids||playerIds.length,coachCount:coachCount||1,date:todayISO(),location:"outdoor",focus:""});setPage("training");}:null} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="team"     &&<TeamPage     members={teamMembers} teamsetCount={teamsets.length} onOpenTeamsets={can(role,"teamplaner")?()=>setPage("teamplaner"):null} players={players} coaches={coaches} sessions={sessions} onSaveSession={saveSe} onSavePlayer={can(role,"editAnything")?savePl:null} onDeletePlayer={can(role,"editAnything")?id=>{const i=players.find(p=>p.id===id);setPlayers(prev=>prev.filter(p=>p.id!==id));showUndo("Spieler",i,()=>setPlayers(prev=>[i,...prev]));}:null} onSaveCoach={can(role,"editAnything")?saveCo:null} onDeleteCoach={can(role,"editAnything")?id=>{const i=coaches.find(c=>c.id===id);setCoaches(prev=>prev.filter(c=>c.id!==id));showUndo("Trainer",i,()=>setCoaches(prev=>[i,...prev]));}:null} toast={toast} showStrength={can(role,"seeStrength")} readOnly={!can(role,"editAnything")} onAddToTraining={can(role,"editAnything")?({playerIds,coachIds,kids,coachCount})=>{setPendingSetup({playerIds,coachIds,kids:kids||playerIds.length,coachCount:coachCount||1,date:todayISO(),location:"outdoor",focus:""});setPage("training");}:null} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="orga"&&can(role,"orga")&&<OrgaPage todos={todos} onSaveTodo={saveTodo} onDeleteTodo={id=>{const i=todos.find(t=>t.id===id);setTodos(prev=>prev.filter(t=>t.id!==id));showUndo("Task",i,()=>setTodos(prev=>[i,...prev]));}} coaches={coaches} currentUser={user} toast={toast} showUndo={showUndo} readOnly={!can(role,"editAnything")} onlineUsers={onlineUsers} pendingTarget={pendingOrgaTarget} onClearPendingTarget={()=>setPendingOrgaTarget(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="teamplaner"&&<TeamplanerPage players={players} teamsets={teamsets} onSaveTeamset={can(role,"editAnything")?saveTSets:null} onDeleteTeamset={can(role,"editAnything")?id=>{const i=teamsets.find(t=>t.id===id);setTeamsets(prev=>prev.filter(t=>t.id!==id));showUndo("Team-Aufstellung",i,()=>setTeamsets(prev=>[i,...prev]));}:null} readOnly={!can(role,"editAnything")} showStrength={can(role,"seeStrength")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="turnier"  &&<TurnierPage  tournaments={tournaments} onSaveTournament={saveTo} onDeleteTournament={id=>{const i=tournaments.find(t=>t.id===id);setTournaments(prev=>prev.filter(t=>t.id!==id));showUndo("Turnier",i,()=>setTournaments(prev=>[i,...prev]));}} coaches={coaches} players={players} onSavePlayer={can(role,"editAnything")?savePl:null} onlineUsers={onlineUsers} currentUser={user} toast={toast} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} initialOpenId={pendingTurnierId} onClearInitialOpen={()=>setPendingTurnierId(null)}/>}
