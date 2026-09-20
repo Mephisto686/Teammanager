@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import Dexie from "dexie";
 import { initializeApp } from "firebase/app";
 import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile, sendPasswordResetEmail, deleteUser as fbDeleteUser, reauthenticateWithCredential, reauthenticateWithPopup, EmailAuthProvider } from "firebase/auth";
+import { getFunctions, httpsCallable } from "firebase/functions";
 import { getFirestore, doc, getDoc, setDoc, onSnapshot, deleteDoc, collection, addDoc, query, orderBy, limit, getDocs, serverTimestamp, where } from "firebase/firestore";
 import { Home, ArrowLeft, Menu, X, BookOpen, Users, CalendarDays, Settings, Plus, Search, Edit2, Trash2, Download, Upload, Shuffle, Filter, Clock, Trophy, Bot, RefreshCw, CheckSquare, Square, Dices, ListChecks, Wallet, Phone, MapPin, AlertTriangle, ShieldCheck, ClipboardList, Star } from "lucide-react";
 
@@ -19,12 +20,17 @@ const FB_CONFIG = {
   messagingSenderId: "418794589338",
   appId: "1:418794589338:web:8e919240086fabb5b9e323"
 };
-let fbApp, fbAuth, fbDb;
+let fbApp, fbAuth, fbDb, fbFunctions;
 try {
   fbApp  = initializeApp(FB_CONFIG);
   fbAuth = getAuth(fbApp);
   fbDb   = getFirestore(fbApp);
+  fbFunctions = getFunctions(fbApp, "europe-west1"); // Region der Cloud Function (siehe functions/index.js)
 } catch(e) { console.error("Firebase init failed:", e); }
+
+// Cloud Function: Nutzer vollständig löschen (Anmeldekonto + Datenbank). Nur globaler Admin.
+// Argument: { uid } oder { email } (für verwaiste Konten)
+const adminDeleteAccount = payload => httpsCallable(fbFunctions, "deleteUserAccount")(payload);
 
 // Read a shared collection document (stored as one doc per collection for simplicity)
 // LEGACY (pre-Gruppen) — wird nur noch von der Migration gelesen, nicht mehr live genutzt
@@ -694,7 +700,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.35.0";
+const APP_VERSION = "3.36.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4822,6 +4828,7 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
         {stab==="activity"&&<ActivityLog/>}
         {stab==="users"&&<div>
           <div style={{marginBottom:12,fontSize:13,color:C.muted}}>Alle registrierten Nutzer und ihre Berechtigungen.</div>
+          <DeleteByEmailForm toast={toast}/>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             {(allUsers||[]).map(u=>{
               const r=USER_ROLES[u.role||"pending"]||USER_ROLES.pending;
@@ -4837,7 +4844,14 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
                     {Object.entries(USER_ROLES).map(([k,v])=><option key={k} value={k}>{v.emoji} {v.label}</option>)}
                   </select>
                   {!isSelf&&<button title="Sperren" onClick={()=>{if(window.confirm(`${u.name||u.email} sperren? Zugriff wird sofort entzogen.`))setUserRole(u.uid,"banned");}} style={{padding:"5px 8px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",cursor:"pointer",color:"#ef4444",fontSize:12,flexShrink:0}}>🚫</button>}
-                  {!isSelf&&<button title="Komplett löschen" onClick={()=>{if(window.confirm(`${u.name||u.email} aus der Datenbank löschen? Rolle und alle Team-Mitgliedschaften werden entfernt.\n\nAchtung: Das Anmeldekonto (E-Mail/Passwort) bleibt bestehen. Damit sich die Person mit derselben E-Mail neu registrieren kann, muss das Konto zusätzlich in der Firebase Console (Authentication → Users) gelöscht werden – oder die Person löscht ihr Profil selbst in den Einstellungen.`))deleteUser(u.uid);}} style={{padding:"5px 8px",borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",color:"#64748b",fontSize:12,flexShrink:0}}>🗑</button>}
+                  {!isSelf&&<button title="Komplett löschen" onClick={async()=>{
+                    if(!window.confirm(`${u.name||u.email} komplett löschen?\n\nEntfernt das Anmeldekonto, alle Team-Mitgliedschaften und das Profil dauerhaft. Die Person kann sich danach mit derselben E-Mail neu registrieren.`)) return;
+                    try{ await adminDeleteAccount({uid:u.uid}); toast("Nutzer komplett gelöscht ✓"); }
+                    catch(e){
+                      if(e.code==="functions/not-found"){ await deleteUser(u.uid); toast("Nur aus der Datenbank entfernt – das Anmeldekonto bleibt, weil die Cloud Function noch nicht eingerichtet ist","warn"); }
+                      else toast(e.message||"Löschen fehlgeschlagen","err");
+                    }
+                  }} style={{padding:"5px 8px",borderRadius:8,border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",color:"#64748b",fontSize:12,flexShrink:0}}>🗑</button>}
                 </div>
               </div>);
             })}
@@ -4888,6 +4902,29 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
         </div>}
       </div>);
     })()}
+  </div>);
+}
+
+// ── ADMIN: Anmeldekonto per E-Mail löschen (z. B. verwaiste Konten, die in der Nutzerliste nicht mehr auftauchen) ──
+function DeleteByEmailForm({toast}) {
+  const [email,setEmail]=useState("");
+  const [busy,setBusy]=useState(false);
+  const run=async()=>{
+    const e1=email.trim();
+    if(!e1) return;
+    if(!window.confirm(`Anmeldekonto ${e1} samt allen zugehörigen Daten dauerhaft löschen?`)) return;
+    setBusy(true);
+    try{ await adminDeleteAccount({email:e1}); toast("Konto gelöscht ✓"); setEmail(""); }
+    catch(e){ toast(e.code==="functions/not-found"?"Die Cloud Function ist noch nicht eingerichtet":(e.message||"Löschen fehlgeschlagen"),"err"); }
+    setBusy(false);
+  };
+  return(<div style={{marginBottom:14,padding:"12px 14px",background:C.card,borderRadius:10,border:`1.5px solid ${C.border}`}}>
+    <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>🧹 Anmeldekonto per E-Mail löschen</div>
+    <div style={{fontSize:12,color:C.muted,marginBottom:8}}>Für alte Konten, die nicht (mehr) in der Liste stehen – danach kann sich die E-Mail neu registrieren.</div>
+    <div style={{display:"flex",gap:8}}>
+      <input value={email} onChange={e=>setEmail(e.target.value)} type="email" placeholder="E-Mail-Adresse" style={{flex:1,minWidth:0,padding:"8px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit"}}/>
+      <Btn sm onClick={run} disabled={busy||!email.trim()}>{busy?"…":"Löschen"}</Btn>
+    </div>
   </div>);
 }
 
