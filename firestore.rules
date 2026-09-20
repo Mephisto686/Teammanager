@@ -1,0 +1,110 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper: ist der Nutzer eingeloggt? ─────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // ── Helper: globale Rolle aus roles/{uid} lesen ────────────────
+    function globalRole() {
+      return get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.role;
+    }
+    function isGlobalAdmin() {
+      return isSignedIn() && globalRole() == "admin";
+    }
+
+    // ── Helper: Rolle des Nutzers INNERHALB einer Gruppe ───────────
+    function groupRole(groupId) {
+      return get(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)).data.role;
+    }
+    function isGroupMember(groupId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid));
+    }
+    function canWriteGroup(groupId) {
+      return isGlobalAdmin() ||
+        (isGroupMember(groupId) && groupRole(groupId) in ["admin","trainer"]);
+    }
+
+    // ── LEGACY: alte roles/{uid} — global ──────────────────────────
+    // "gesperrt" (banned) als globale Vollsperre entfällt (Sperren jetzt pro Gruppe).
+    // Bleibt nur noch für: globale Admin-Kennzeichnung + Migrations-Fallback.
+    match /roles/{uid} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.auth.uid == uid;
+      allow update, delete: if isGlobalAdmin() || (isSignedIn() && request.auth.uid == uid);
+    }
+
+    // ── GRUPPEN-VERZEICHNIS ──────────────────────────────────────────
+    // Metadaten (Name etc.) sind für JEDEN eingeloggten Nutzer lesbar,
+    // damit das offene Dropdown "Team beitreten" funktioniert.
+    // Betrifft NUR dieses Dokument, nicht die Unter-Collections darunter.
+    match /groups/{groupId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn(); // Anlegen einer neuen Gruppe
+      allow update, delete: if canWriteGroup(groupId);
+
+      // Mitgliederliste der Gruppe
+      match /members/{uid} {
+        // TEST: bewusst ohne isGlobalAdmin()/isGroupMember() (die get()/exists() nutzen) —
+        // um zu prüfen, ob DAS der Blocker für die collectionGroup-Abfrage ist.
+        allow read: if isSignedIn() && resource.data.uid == request.auth.uid;
+        // Selbstbeitritt per Einladungscode: nur mit Rolle "eltern" möglich,
+        // niemals admin/trainer im Erstschreiben. Höherstufen braucht canWriteGroup.
+        allow create: if isGlobalAdmin() ||
+          (isSignedIn() && request.auth.uid == uid && request.resource.data.role == "eltern") ||
+          canWriteGroup(groupId);
+        allow update, delete: if canWriteGroup(groupId);
+      }
+
+      // Einladungscode der Gruppe — nur für Mitglieder/Admin sichtbar
+      match /settings/{docId} {
+        allow read: if isGlobalAdmin() || isGroupMember(groupId);
+        allow write: if canWriteGroup(groupId);
+      }
+
+      // Beitrittswünsche (Dropdown-Weg ohne Code)
+      match /joinRequests/{uid} {
+        // Antragsteller darf seinen eigenen Wunsch anlegen/zurückziehen
+        allow create: if isSignedIn() && request.auth.uid == uid;
+        allow read: if canWriteGroup(groupId) || (isSignedIn() && request.auth.uid == uid);
+        allow delete: if canWriteGroup(groupId) || (isSignedIn() && request.auth.uid == uid);
+        allow update: if false;
+      }
+
+      // Trainings/Kader/Turniere/Kasse/To-Dos etc. — je Kategorie ein Dokument
+      match /shared/{col} {
+        allow read: if isGlobalAdmin() || isGroupMember(groupId);
+        // Kassenbuch: nur admin darf schreiben (spiegelt CAN.editKasse im Client)
+        allow write: if col == "kassenbuch"
+          ? (isGlobalAdmin() || (isGroupMember(groupId) && groupRole(groupId) == "admin"))
+          : canWriteGroup(groupId);
+      }
+    }
+
+    // ── EINLADUNGSCODES ──────────────────────────────────────────────
+    // Gezieltes Nachschlagen eines bekannten Codes ist erlaubt (get),
+    // ein Durchsuchen/Auflisten ALLER Codes ist gesperrt (list).
+    match /inviteCodes/{code} {
+      allow get: if isSignedIn();
+      allow list: if false;
+      allow create: if isSignedIn();
+      allow update, delete: if false;
+    }
+
+    // ── PRESENCE ─────────────────────────────────────────────────────
+    match /presence/{uid} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    // ── ACTIVITY LOG ─────────────────────────────────────────────────
+    match /activity/{docId} {
+      allow read: if isGlobalAdmin();
+      allow create: if isSignedIn();
+      allow update, delete: if false;
+    }
+  }
+}

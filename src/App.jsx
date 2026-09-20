@@ -143,24 +143,49 @@ async function createGroup(user, name) {
   } catch (e) { return { ok: false, error: e.code || "unknown" }; }
 }
 
-// Beitritt per Einladungscode. Eltern/Spieler treten sofort bei (Selbstbeitritt nur mit diesen Rollen),
-// Trainer stellen einen Beitrittswunsch, den der Admin bestätigen muss.
-async function joinGroupByCode(user, code, role = "eltern") {
+// Beitritt (gemeinsame Logik). Eltern/Spieler treten sofort bei – per Einladungscode/-link oder in offenen Teams.
+// Trainer (und alle Rollen in geschlossenen Teams ohne Code) stellen einen Beitrittswunsch, den der Admin bestätigt.
+async function joinCore(user, groupId, rolesIn, opts = {}) {
+  const roles = parseJoinRoles(rolesIn);
+  const memRef = doc(fbDb, "groups", groupId, "members", user.uid);
+  // Schon Mitglied (z. B. Admin öffnet Einladungslink): nichts überschreiben
+  if ((await getDoc(memRef)).exists()) return { ok: true, groupId, already: true };
+  const base = { uid: user.uid, name: user.displayName || "", email: user.email || "", photo: user.photoURL || null };
+  const direct = ["eltern","spieler"].filter(r => roles.includes(r));
+  let pending = roles.filter(r => r === "trainer");
+  let joined = false;
+  if (direct.length && (opts.code || opts.open)) {
+    const memberDoc = { ...base, role: primaryRole(direct), roles: direct, joinedAt: new Date().toISOString() };
+    if (opts.code) memberDoc.joinCode = opts.code;
+    await setDoc(memRef, memberDoc);
+    joined = true;
+  } else {
+    pending = roles; // kein direkter Beitritt möglich (geschlossenes Team ohne Code): alles muss bestätigt werden
+  }
+  if (pending.length) {
+    const reqRef = doc(fbDb, "groups", groupId, "joinRequests", user.uid);
+    if (!(await getDoc(reqRef)).exists()) {
+      await setDoc(reqRef, { ...base, requestedRole: primaryRole(pending), requestedRoles: pending, requestedAt: new Date().toISOString() });
+    }
+  }
+  return { ok: true, groupId, joined, pending: pending.length > 0 };
+}
+async function joinGroupByCode(user, code, roles = ["eltern"]) {
   if (!fbDb || !user || !code?.trim()) return { ok: false, error: "invalid" };
   try {
-    const codeSnap = await getDoc(doc(fbDb, "inviteCodes", code.trim().toUpperCase()));
+    const c = code.trim().toUpperCase();
+    const codeSnap = await getDoc(doc(fbDb, "inviteCodes", c));
     if (!codeSnap.exists()) return { ok: false, error: "invalid-code" };
-    const groupId = codeSnap.data().groupId;
-    const memRef = doc(fbDb, "groups", groupId, "members", user.uid);
-    // Schon Mitglied (z. B. Admin öffnet Einladungslink): nichts überschreiben
-    if ((await getDoc(memRef)).exists()) return { ok: true, groupId, already: true };
-    const base = { uid: user.uid, name: user.displayName || "", email: user.email || "", photo: user.photoURL || null };
-    if (role === "trainer") {
-      await setDoc(doc(fbDb, "groups", groupId, "joinRequests", user.uid), { ...base, requestedRole: "trainer", requestedAt: new Date().toISOString() });
-      return { ok: true, groupId, pending: true };
-    }
-    await setDoc(memRef, { ...base, role: role === "spieler" ? "spieler" : "eltern", joinedAt: new Date().toISOString() });
-    return { ok: true, groupId };
+    return await joinCore(user, codeSnap.data().groupId, roles, { code: c });
+  } catch (e) { return { ok: false, error: e.code || "unknown" }; }
+}
+// Beitritt über die Team-Auswahl ohne Code: nur in offenen Teams sofort (Standard), sonst Beitrittswunsch
+async function joinGroupOpen(user, groupId, roles = ["eltern"]) {
+  if (!fbDb || !user || !groupId) return { ok: false, error: "invalid" };
+  try {
+    const g = await getDoc(doc(fbDb, "groups", groupId));
+    const open = g.exists() && g.data().openJoin !== false;
+    return await joinCore(user, groupId, roles, { open });
   } catch (e) { return { ok: false, error: e.code || "unknown" }; }
 }
 
@@ -180,16 +205,26 @@ async function cancelJoinRequest(user, groupId) {
   if (!fbDb || !user) return;
   try { await deleteDoc(doc(fbDb, "groups", groupId, "joinRequests", user.uid)); } catch (e) {}
 }
-async function approveJoinRequest(groupId, uid, role = "eltern") {
+async function approveJoinRequest(groupId, uid, rolesIn = ["eltern"]) {
   if (!fbDb) return;
   try {
-    const reqSnap = await getDoc(doc(fbDb, "groups", groupId, "joinRequests", uid));
+    const roles = Array.isArray(rolesIn) ? rolesIn : [rolesIn];
+    const reqRef = doc(fbDb, "groups", groupId, "joinRequests", uid);
+    const memRef = doc(fbDb, "groups", groupId, "members", uid);
+    const [reqSnap, memSnap] = await Promise.all([getDoc(reqRef), getDoc(memRef)]);
     const data = reqSnap.exists() ? reqSnap.data() : {};
-    await setDoc(doc(fbDb, "groups", groupId, "members", uid), {
-      uid, role, name: data.name || "", email: data.email || "", photo: data.photo || null,
-      joinedAt: new Date().toISOString()
-    });
-    await deleteDoc(doc(fbDb, "groups", groupId, "joinRequests", uid));
+    // Schon Mitglied (z. B. als Elternteil): die bestätigte Rolle (Trainer) kommt dazu, bestehende Rollen und Verknüpfungen bleiben
+    const have = memSnap.exists() ? memberRoles(memSnap.data()) : [];
+    const all = ROLE_ORDER.filter(r => [...have, ...roles].includes(r));
+    if (memSnap.exists()) {
+      await setDoc(memRef, { role: primaryRole(all), roles: all }, { merge: true });
+    } else {
+      await setDoc(memRef, {
+        uid, role: primaryRole(all), roles: all, name: data.name || "", email: data.email || "", photo: data.photo || null,
+        joinedAt: new Date().toISOString()
+      });
+    }
+    await deleteDoc(reqRef);
   } catch (e) { console.warn("approveJoinRequest", e); }
 }
 async function rejectJoinRequest(groupId, uid) {
@@ -280,6 +315,15 @@ const memberRoles = m => {
   return ROLE_ORDER.filter(x=>r.includes(x)).concat(r.filter(x=>!ROLE_ORDER.includes(x)));
 };
 const primaryRole = roles => ROLE_ORDER.find(r=>roles.includes(r)) || roles[0] || "eltern";
+// Rollen, die man beim Beitritt/Registrieren wählen kann (mehrere möglich). Eltern/Spieler treten sofort bei, Trainer braucht die Bestätigung des Admins.
+const JOIN_ROLES = ["eltern","spieler","trainer"];
+const parseJoinRoles = v => {
+  let a = v;
+  if(typeof v==="string"){ try{ a = JSON.parse(v); }catch(e){ a = v.split(","); } }
+  if(!Array.isArray(a)) a = [a];
+  a = JOIN_ROLES.filter(r=>a.includes(r));
+  return a.length ? a : ["eltern"];
+};
 const CAN = {
   // tabs visible
   start:    ["admin","trainer","eltern","spieler"],
@@ -456,15 +500,14 @@ function TeamSwitcher() {
 // Admin/Trainer/Eltern wechseln, Trainer mit verknüpftem Kind zwischen Trainer/Eltern.
 // Rein Ansicht: die echten Zugriffsrechte (Firestore Rules) ändern sich dadurch nicht.
 // ── EINLADUNGSLINK ────────────────────────────────────────────────
-const buildInviteLink = (code, role="eltern") =>
-  `${window.location.origin}${window.location.pathname}?join=${encodeURIComponent(code)}&r=${role}`;
+const buildInviteLink = (code, roles=["eltern"]) =>
+  `${window.location.origin}${window.location.pathname}?join=${encodeURIComponent(code)}&r=${[].concat(roles).join(",")}`;
 (function captureJoinLink(){
   try{
     const q=new URLSearchParams(window.location.search);
     const code=q.get("join");
     if(!code) return;
-    const r=q.get("r");
-    localStorage.setItem("pendingJoin",JSON.stringify({code:code.trim().toUpperCase(),role:["eltern","spieler","trainer"].includes(r)?r:"eltern"}));
+    localStorage.setItem("pendingJoin",JSON.stringify({code:code.trim().toUpperCase(),roles:parseJoinRoles(q.get("r"))}));
     window.history.replaceState(null,"",window.location.pathname+window.location.hash);
   }catch(e){}
 })();
@@ -700,7 +743,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.36.0";
+const APP_VERSION = "3.37.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4554,16 +4597,21 @@ function UserNameEditor({u,isSelf,setUserName}) {
 
 // ── ROLLENWAHL (Registrierung / Beitritt / Einladung) ─────────────
 function RolePicker({value,onChange}) {
+  const sel=parseJoinRoles(value);
   const opts=[["eltern","👪","Elternteil"],["spieler","⚽","Spieler"],["trainer","🧑‍🏫","Trainer"]];
-  return(<div style={{display:"flex",gap:6}}>
-    {opts.map(([k,e,l])=><button key={k} type="button" onClick={()=>onChange(k)} style={{flex:1,minWidth:0,padding:"8px 4px",borderRadius:10,border:`2px solid ${value===k?C.primary:C.border}`,background:value===k?C.accentL:C.card,color:value===k?C.primary:C.muted,fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{e} {l}</button>)}
+  const toggle=k=>{ const next=sel.includes(k)?sel.filter(x=>x!==k):[...sel,k]; if(next.length) onChange(JOIN_ROLES.filter(r=>next.includes(r))); };
+  return(<div>
+    <div style={{display:"flex",gap:6}}>
+      {opts.map(([k,e,l])=>{const on=sel.includes(k);return <button key={k} type="button" onClick={()=>toggle(k)} style={{flex:1,minWidth:0,padding:"8px 4px",borderRadius:10,border:`2px solid ${on?C.primary:C.border}`,background:on?C.accentL:C.card,color:on?C.primary:C.muted,fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{on?"✓ ":""}{e} {l}</button>;})}
+    </div>
+    <div style={{fontSize:11,color:C.muted,marginTop:5}}>Mehrere möglich – z. B. Trainer und Elternteil.</div>
   </div>);
 }
 
 // ── EINLADUNG: Link + Code teilen (Admin & Trainer) ───────────────
 function InviteCard({code,toast}) {
-  const [role,setRole]=useState("eltern");
-  const link=buildInviteLink(code,role);
+  const [roles,setRoles]=useState(["eltern"]);
+  const link=buildInviteLink(code,roles);
   const copy=(txt,label)=>{ if(navigator.clipboard) navigator.clipboard.writeText(txt).then(()=>toast(label+" kopiert ✓")); else toast("Kopieren nicht möglich","warn"); };
   const share=async()=>{
     if(navigator.share){ try{ await navigator.share({title:"Einladung ins Team",text:"Hier ist dein Einladungslink:",url:link}); }catch(e){} }
@@ -4573,14 +4621,14 @@ function InviteCard({code,toast}) {
   return(<div style={{marginBottom:16,padding:"14px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`}}>
     <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:10}}>🔗 Einladung</div>
     <div style={{fontSize:12,fontWeight:700,color:C.muted,marginBottom:6}}>Einladen als</div>
-    <RolePicker value={role} onChange={setRole}/>
+    <RolePicker value={roles} onChange={setRoles}/>
     <div style={{marginTop:10,padding:"9px 12px",borderRadius:8,background:C.bg,border:`1.5px solid ${C.border}`,fontSize:12,color:C.text,wordBreak:"break-all"}}>{link}</div>
     <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:10}}>
       <button onClick={()=>copy(link,"Link")} style={btn}>🔗 Link kopieren</button>
       <button onClick={share} style={{...btn,background:"#0ea5e9"}}>📤 Teilen</button>
     </div>
     <div style={{fontSize:12,color:C.muted,marginTop:12}}>Oder Code weitergeben: <b style={{letterSpacing:2,fontSize:14,color:C.text}}>{code}</b> <button onClick={()=>copy(code,"Code")} style={{marginLeft:6,padding:"3px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:C.card,color:C.text,fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>Kopieren</button></div>
-    <div style={{fontSize:11,color:C.muted,marginTop:8}}>{role==="trainer"?"Trainer müssen nach der Anmeldung vom Admin bestätigt werden.":"Eltern und Spieler treten sofort bei. Danach werden sie mit dem Kind bzw. Spielerprofil verknüpft."}</div>
+    <div style={{fontSize:11,color:C.muted,marginTop:8}}>{roles.includes("trainer")?"Die Trainer-Rolle bestätigt nach der Anmeldung der Admin. Eltern und Spieler treten sofort bei und wählen ihr Kind bzw. Spielerprofil selbst aus.":"Eltern und Spieler treten sofort bei und wählen ihr Kind bzw. Spielerprofil danach selbst aus."}</div>
   </div>);
 }
 
@@ -4590,10 +4638,16 @@ function TeamsCard({user,groupId,memberships,onSwitchGroup,toast,canRename=false
   const [modal,setModal]=useState(null); // "create" | "join"
   const [name,setName]=useState("");
   const [code,setCode]=useState("");
-  const [role,setRole]=useState(()=>{try{return localStorage.getItem("pendingJoinRole")||"eltern";}catch(e){return "eltern";}});
+  const [roles,setRoles]=useState(()=>{try{return parseJoinRoles(localStorage.getItem("pendingJoinRole"));}catch(e){return ["eltern"];}});
   const [busy,setBusy]=useState(false);
   const [newName,setNewName]=useState("");
   const nameOf=gid=>allGroups.find(g=>g.id===gid)?.name||gid;
+  const groupOpen=allGroups.find(g=>g.id===groupId)?.openJoin!==false;
+  // Admin: Offener Beitritt – Eltern/Spieler dürfen auch ohne Code aus der Team-Liste beitreten
+  const toggleOpen=async()=>{
+    try{ await setDoc(doc(fbDb,"groups",groupId),{openJoin:!groupOpen},{merge:true}); writeLog(groupId,user,"team",`Offener Beitritt ${!groupOpen?"eingeschaltet":"ausgeschaltet"}`,"coach"); }
+    catch(e){ toast("Speichern nicht möglich","err"); }
+  };
   const goto=gid=>{ try{localStorage.setItem("currentGroupId",gid);}catch(e){} setTimeout(()=>window.location.reload(),400); };
   const doCreate=async()=>{
     if(!name.trim()) return; setBusy(true);
@@ -4603,10 +4657,10 @@ function TeamsCard({user,groupId,memberships,onSwitchGroup,toast,canRename=false
   };
   const doJoin=async()=>{
     if(!code.trim()) return; setBusy(true);
-    const r=await joinGroupByCode(user,code.trim(),role); setBusy(false);
+    const r=await joinGroupByCode(user,code.trim(),roles); setBusy(false);
     if(!r.ok){ toast(r.error==="invalid-code"?"Code ungültig":"Fehler: "+r.error,"err"); return; }
-    if(r.pending){ toast("Beitrittswunsch gesendet – der Admin muss bestätigen"); setModal(null); return; }
-    toast(r.already?"Du bist schon in diesem Team":"Team beigetreten ✓"); goto(r.groupId);
+    if(r.pending&&!r.joined&&!r.already){ toast("Beitrittswunsch gesendet – der Admin muss bestätigen"); setModal(null); return; }
+    toast(r.already?"Du bist schon in diesem Team":(r.pending?"Beigetreten – die Trainer-Rolle bestätigt noch der Admin":"Team beigetreten ✓")); goto(r.groupId);
   };
   // Admin: Team nachträglich umbenennen (Name steht im Gruppen-Dokument und wird überall live übernommen)
   const doRename=async()=>{
@@ -4632,6 +4686,10 @@ function TeamsCard({user,groupId,memberships,onSwitchGroup,toast,canRename=false
       <Btn sm variant="secondary" onClick={()=>setModal("create")}>➕ Weiteres Team anlegen</Btn>
       <Btn sm variant="secondary" onClick={()=>setModal("join")}>🔗 Team beitreten</Btn>
     </div>
+    {canRename&&<label style={{display:"flex",alignItems:"flex-start",gap:8,marginTop:12,fontSize:12,color:C.text,cursor:"pointer"}}>
+      <input type="checkbox" checked={groupOpen} onChange={toggleOpen} style={{marginTop:2}}/>
+      <span><b>Offener Beitritt:</b> Eltern und Spieler können auch ohne Code aus der Team-Liste beitreten – ohne Bestätigung. Ausgeschaltet gelingt der sofortige Beitritt nur mit Einladungscode oder -link.</span>
+    </label>}
     {modal==="rename"&&<Modal title="Team umbenennen" onClose={()=>setModal(null)}>
       <div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:8}}>Neuer Name des Teams / Vereins</div>
       <input value={newName} onChange={e=>setNewName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")doRename();}} maxLength={60} style={inp}/>
@@ -4648,8 +4706,8 @@ function TeamsCard({user,groupId,memberships,onSwitchGroup,toast,canRename=false
       <div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:8}}>Einladungscode</div>
       <input value={code} onChange={e=>setCode(e.target.value.toUpperCase())} placeholder="z. B. AB12CD" maxLength={8} style={{...inp,fontSize:16,letterSpacing:2,textAlign:"center"}}/>
       <div style={{fontWeight:800,fontSize:14,color:C.text,margin:"14px 0 8px"}}>Ich bin …</div>
-      <RolePicker value={role} onChange={setRole}/>
-      <div style={{fontSize:11,color:C.muted,marginTop:8}}>{role==="trainer"?"Trainer müssen vom Admin bestätigt werden.":"Beitritt sofort. Danach verknüpft dich der Trainer mit dem Kind bzw. Spielerprofil."}</div>
+      <RolePicker value={roles} onChange={setRoles}/>
+      <div style={{fontSize:11,color:C.muted,marginTop:8}}>{roles.includes("trainer")?"Die Trainer-Rolle bestätigt der Admin, alles andere gilt sofort.":"Beitritt sofort. Danach wählst du dein Kind bzw. Spielerprofil aus."}</div>
       <div style={{display:"flex",justifyContent:"flex-end",marginTop:14}}><Btn onClick={doJoin} disabled={busy||!code.trim()}>{busy?"…":"Beitreten"}</Btn></div>
     </Modal>}
   </div>);
@@ -4756,9 +4814,9 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
             {r.photo?<img src={r.photo} width={32} height={32} style={{borderRadius:"50%",flexShrink:0}}/>:<div style={{width:32,height:32,borderRadius:"50%",background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,color:C.primary,flexShrink:0}}>{(r.name||"?")[0].toUpperCase()}</div>}
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontWeight:700,fontSize:13,color:C.text}}>{r.name||r.email}</div>
-              <div style={{fontSize:11,color:C.muted}}>{r.email}{r.requestedRole&&r.requestedRole!=="eltern"?` · möchte ${USER_ROLES[r.requestedRole]?.label||r.requestedRole} sein`:""}</div>
+              <div style={{fontSize:11,color:C.muted}}>{r.email} · möchte {parseJoinRoles(r.requestedRoles||r.requestedRole).map(k=>`${USER_ROLES[k]?.emoji||""} ${USER_ROLES[k]?.label||k}`).join(" + ")} sein</div>
             </div>
-            <button onClick={()=>{approveJoinRequest(groupId,r.uid,r.requestedRole||"eltern");writeLog(groupId,firebaseUser,"team",`${r.name||r.email} ins Team aufgenommen (${USER_ROLES[r.requestedRole||"eltern"]?.label})`,"coach");}} style={{padding:"6px 10px",borderRadius:8,border:"none",background:"#22c55e",color:"white",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✓ {r.requestedRole==="trainer"?"Als Trainer annehmen":r.requestedRole==="spieler"?"Als Spieler annehmen":"Annehmen"}</button>
+            <button onClick={()=>{const rr=parseJoinRoles(r.requestedRoles||r.requestedRole);approveJoinRequest(groupId,r.uid,rr);writeLog(groupId,firebaseUser,"team",`${r.name||r.email}: ${rr.map(k=>USER_ROLES[k]?.label||k).join(" + ")} bestätigt`,"coach");}} style={{padding:"6px 10px",borderRadius:8,border:"none",background:"#22c55e",color:"white",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✓ {parseJoinRoles(r.requestedRoles||r.requestedRole).includes("trainer")?"Als Trainer annehmen":"Annehmen"}</button>
             <button onClick={()=>{rejectJoinRequest(groupId,r.uid);writeLog(groupId,firebaseUser,"team",`Beitrittswunsch von ${r.name||r.email} abgelehnt`,"coach");}} style={{padding:"6px 10px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",color:"#ef4444",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✕</button>
           </div>)}
         </div>
@@ -5000,6 +5058,80 @@ function DeleteAccountCard({firebaseUser,memberships,toast}) {
   </div>);
 }
 
+// ── KIND / SPIELERPROFIL WÄHLEN (Eltern & Spieler nach dem Beitritt) ──
+// Cloud Function "claimChildren": verknüpft ausgewählte Profile und legt neue Kinder direkt in der Spielerliste an.
+const claimChildren = payload => httpsCallable(fbFunctions, "claimChildren")(payload);
+function ChildPicker({role,players,current=[],groupId,toast,onDone,onSkip}) {
+  const single = role==="spieler"; // Spieler: genau ein eigenes Profil
+  const [sel,setSel]=useState([]);
+  const [newNames,setNewNames]=useState([]);
+  const [input,setInput]=useState("");
+  const [q,setQ]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState("");
+  const avail=players.filter(p=>p.active!==false&&!current.includes(p.id)).sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+  const list=avail.filter(p=>!q.trim()||(p.name||"").toLowerCase().includes(q.trim().toLowerCase()));
+  const total=sel.length+newNames.length;
+  const toggle=id=>{ setErr(""); if(single) setNewNames([]); setSel(v=>single?(v.includes(id)?[]:[id]):(v.includes(id)?v.filter(x=>x!==id):[...v,id])); };
+  const addName=()=>{
+    const n=input.trim().replace(/\s+/g," ");
+    if(!n) return;
+    const dup=avail.find(p=>(p.name||"").trim().toLowerCase()===n.toLowerCase());
+    if(dup){ if(!sel.includes(dup.id)) toggle(dup.id); toast(`„${dup.name}" steht schon in der Liste – ausgewählt`); setInput(""); return; }
+    if(single){ setSel([]); setNewNames([n]); }
+    else setNewNames(v=>v.some(x=>x.toLowerCase()===n.toLowerCase())?v:[...v,n]);
+    setInput("");
+  };
+  const run=async()=>{
+    setBusy(true); setErr("");
+    try{
+      const r=await claimChildren({groupId,existingIds:sel,newNames});
+      toast(r?.data?.created?.length?"Gespeichert – neues Kind ist jetzt in der Spielerliste ✓":"Gespeichert ✓");
+      onDone&&onDone();
+    }catch(e){
+      console.warn(e);
+      setErr(e.code==="functions/not-found"?"Das ist gerade nicht möglich (Funktion nicht eingerichtet). Bitte den Trainer, dich zu verknüpfen.":(e.message||"Speichern fehlgeschlagen"));
+    }
+    setBusy(false);
+  };
+  const box={border:`1.5px solid ${C.border}`,borderRadius:10,background:C.card};
+  return(<div>
+    <div style={{fontSize:13,color:C.muted,marginBottom:12}}>{single?"Wähle dein Spielerprofil aus der Liste oder trage dich neu ein.":"Wähle dein Kind (bei Zwillingen oder Geschwistern auch mehrere) aus der Liste oder trage ein neues Kind ein. Ein neues Kind kommt direkt in die Spielerliste des Teams."}</div>
+    {avail.length>6&&<input value={q} onChange={e=>setQ(e.target.value)} placeholder="Name suchen …" style={{...box,width:"100%",padding:"9px 12px",fontSize:14,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit",boxSizing:"border-box",marginBottom:8}}/>}
+    <div style={{...box,maxHeight:260,overflowY:"auto",padding:"2px 12px",marginBottom:12}}>
+      {list.length===0&&<div style={{fontSize:13,color:C.muted,padding:"12px 0"}}>{avail.length===0?"Noch keine Spieler in der Liste – trage unten einen Namen ein.":"Kein Treffer."}</div>}
+      {list.map(p=><label key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:`1px solid ${C.border}`,cursor:"pointer"}}>
+        <input type={single?"radio":"checkbox"} checked={sel.includes(p.id)} onChange={()=>toggle(p.id)} style={{width:18,height:18}}/>
+        <span style={{fontSize:14,fontWeight:700,color:C.text}}>{p.name}</span>
+      </label>)}
+    </div>
+    <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>{single?"Nicht dabei? Neu eintragen":"Kind nicht dabei? Neu eintragen"}</div>
+    <div style={{display:"flex",gap:8}}>
+      <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")addName();}} placeholder={single?"Dein Name":"Name des Kindes"} maxLength={60} style={{...box,flex:1,minWidth:0,padding:"9px 12px",fontSize:14,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit"}}/>
+      <Btn sm variant="secondary" onClick={addName} disabled={!input.trim()}>➕ Hinzufügen</Btn>
+    </div>
+    {newNames.length>0&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:8}}>
+      {newNames.map(n=><span key={n} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 10px",borderRadius:20,background:"#dcfce7",color:"#166534",fontWeight:700,fontSize:13}}>🆕 {n}<button onClick={()=>setNewNames(v=>v.filter(x=>x!==n))} style={{border:"none",background:"transparent",cursor:"pointer",color:"#166534",fontWeight:800}}>✕</button></span>)}
+    </div>}
+    {err&&<div style={{fontSize:12,color:"#b91c1c",background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,padding:"8px 10px",marginTop:10}}>{err}</div>}
+    <div style={{display:"flex",justifyContent:"space-between",gap:8,flexWrap:"wrap",marginTop:16}}>
+      {onSkip?<button onClick={onSkip} style={{border:"none",background:"transparent",color:C.muted,fontSize:13,cursor:"pointer",fontFamily:"inherit",textDecoration:"underline"}}>Später</button>:<span/>}
+      <Btn onClick={run} disabled={busy||total===0}>{busy?"Speichere …":"Speichern"}{total>0&&!busy?` (${total})`:""}</Btn>
+    </div>
+  </div>);
+}
+function ChildSetupPage({role,players,groupId,toast,onSkip}) {
+  return(<div style={{maxWidth:520,margin:"0 auto"}}>
+    <div style={{textAlign:"center",marginBottom:16}}>
+      <div style={{fontSize:40}}>{role==="spieler"?"⚽":"👪"}</div>
+      <h1 style={{margin:"6px 0 0",fontSize:22,fontWeight:900,color:C.text}}>{role==="spieler"?"Wer bist du im Team?":"Welches Kind gehört zu dir?"}</h1>
+    </div>
+    <div style={{background:C.card,borderRadius:14,border:`1.5px solid ${C.border}`,padding:"18px 18px 16px"}}>
+      <ChildPicker role={role} players={players} groupId={groupId} toast={toast} onSkip={onSkip}/>
+    </div>
+  </div>);
+}
+
 // ── EINSTELLUNGEN FÜR ELTERN (bewusst minimal) ────────────────────
 const FONT_SCALES = [{v:1,l:"Normal"},{v:1.15,l:"Groß"},{v:1.3,l:"Sehr groß"}];
 function FontScaleControl({prefs,onFontScale}) {
@@ -5011,9 +5143,10 @@ function FontScaleControl({prefs,onFontScale}) {
     </div>
   </div>);
 }
-function ParentSettingsPage({role,firebaseUser,groupId,memberships,onSwitchGroup,myKids,prefs,onPrefChange,onFontScale,onLogout,toast,onlineUsers}) {
+function ParentSettingsPage({role,players=[],firebaseUser,groupId,memberships,onSwitchGroup,myKids,prefs,onPrefChange,onFontScale,onLogout,toast,onlineUsers}) {
   const [name,setName]=useState(firebaseUser?.displayName||"");
   const [saving,setSaving]=useState(false);
+  const [kidsModal,setKidsModal]=useState(false);
   const scale=prefs.fontScale||1;
   const card={padding:"14px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`};
   const head={fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:12};
@@ -5045,6 +5178,8 @@ function ParentSettingsPage({role,firebaseUser,groupId,memberships,onSwitchGroup
         </div>
         <div style={{fontSize:12,color:C.muted,marginTop:10}}>E-Mail: {firebaseUser?.email}</div>
         {myKids.length>0&&<div style={{fontSize:12,color:C.muted,marginTop:4}}>{role==="spieler"?"Mein Spielerprofil":myKids.length>1?"Verknüpfte Kinder":"Verknüpftes Kind"}: <b style={{color:C.text}}>{myKids.map(k=>k.name).join(", ")}</b></div>}
+        {(role==="eltern"||!(role==="spieler"&&myKids.length>0))&&<div style={{marginTop:10}}><Btn sm variant="secondary" onClick={()=>setKidsModal(true)}>{role==="spieler"?"Spielerprofil wählen":myKids.length?"➕ Weiteres Kind zuordnen":"Kind zuordnen"}</Btn></div>}
+        {kidsModal&&<Modal title={role==="spieler"?"Spielerprofil wählen":"Kind zuordnen"} onClose={()=>setKidsModal(false)}><ChildPicker role={role} players={players} current={myKids.map(k=>k.id)} groupId={groupId} toast={toast} onDone={()=>setKidsModal(false)}/></Modal>}
       </div>
 
       <TeamsCard user={firebaseUser} groupId={groupId} memberships={memberships} onSwitchGroup={onSwitchGroup} toast={toast}/>
@@ -5872,9 +6007,9 @@ function AuthScreen({onGoogle,onEmail,onRegister,onReset}) {
   const [err,setErr]=useState("");
   const [info,setInfo]=useState("");
   const [loading,setLoading]=useState(false);
-  const [role,setRole]=useState(()=>{try{const p=JSON.parse(localStorage.getItem("pendingJoin")||"null");return p?.role||localStorage.getItem("pendingJoinRole")||"eltern";}catch(e){return "eltern";}});
+  const [roles,setRoles]=useState(()=>{try{const p=JSON.parse(localStorage.getItem("pendingJoin")||"null");return parseJoinRoles(p?.roles||p?.role||localStorage.getItem("pendingJoinRole"));}catch(e){return ["eltern"];}});
   const pendingInvite=(()=>{try{return !!JSON.parse(localStorage.getItem("pendingJoin")||"null");}catch(e){return false;}})();
-  const rememberRole=()=>{try{localStorage.setItem("pendingJoinRole",role);const p=JSON.parse(localStorage.getItem("pendingJoin")||"null");if(p){p.role=role;localStorage.setItem("pendingJoin",JSON.stringify(p));}}catch(e){}};
+  const rememberRole=()=>{try{localStorage.setItem("pendingJoinRole",JSON.stringify(roles));const p=JSON.parse(localStorage.getItem("pendingJoin")||"null");if(p){p.roles=roles;delete p.role;localStorage.setItem("pendingJoin",JSON.stringify(p));}}catch(e){}};
 
   const ERROR_MSGS={
     "auth/user-not-found":"Kein Konto mit dieser E-Mail gefunden",
@@ -5925,7 +6060,7 @@ function AuthScreen({onGoogle,onEmail,onRegister,onReset}) {
         </div>
 
         {mode==="register"&&inp(name,setName,"text","Name (Anzeigename)","name")}
-        {mode==="register"&&<div><div style={{fontSize:12,fontWeight:700,color:C.muted,marginBottom:6}}>Ich bin …</div><RolePicker value={role} onChange={setRole}/>{role==="trainer"&&<div style={{fontSize:11,color:C.muted,marginTop:6}}>Trainer-Zugänge bestätigt der Team-Admin.</div>}{!pendingInvite&&<div style={{fontSize:11,color:C.muted,marginTop:6}}>Nach der Registrierung kannst du ein neues Team anlegen oder per Code/Link beitreten.</div>}</div>}
+        {mode==="register"&&<div><div style={{fontSize:12,fontWeight:700,color:C.muted,marginBottom:6}}>Ich bin …</div><RolePicker value={roles} onChange={setRoles}/>{roles.includes("trainer")&&<div style={{fontSize:11,color:C.muted,marginTop:6}}>Die Trainer-Rolle bestätigt der Team-Admin.</div>}{!pendingInvite&&<div style={{fontSize:11,color:C.muted,marginTop:6}}>Nach der Registrierung kannst du ein neues Team anlegen oder per Code/Link beitreten.</div>}</div>}
         {inp(email,setEmail,"email","E-Mail-Adresse","email")}
         {mode!=="reset"&&inp(password,setPassword,"password","Passwort","current-password")}
 
@@ -5985,7 +6120,7 @@ function GroupOnboarding({user, onLogout, toast}) {
   const [code,setCode]=useState("");
   const [selectedGroupId,setSelectedGroupId]=useState("");
   const [busy,setBusy]=useState(false);
-  const [role,setRole]=useState(()=>{try{return localStorage.getItem("pendingJoinRole")||"eltern";}catch(e){return "eltern";}});
+  const [roles,setRoles]=useState(()=>{try{return parseJoinRoles(localStorage.getItem("pendingJoinRole"));}catch(e){return ["eltern"];}});
   const [requestedGroupId,setRequestedGroupId]=useState(()=>localStorage.getItem("pendingJoinRequest")||null);
   const allGroups=useAllGroups(user);
 
@@ -6009,21 +6144,22 @@ function GroupOnboarding({user, onLogout, toast}) {
   const doJoinCode=async()=>{
     if(!code.trim()) return;
     setBusy(true);
-    const r=await joinGroupByCode(user,code.trim(),role);
+    const r=await joinGroupByCode(user,code.trim(),roles);
     setBusy(false);
     if(!r.ok){ toast(r.error==="invalid-code"?"Code ungültig":"Fehler: "+r.error,"err"); return; }
-    if(r.pending){ setRequestedGroupId(r.groupId); localStorage.setItem("pendingJoinRequest",r.groupId); toast("Beitrittswunsch gesendet ✓"); return; }
+    if(r.pending&&!r.joined&&!r.already){ setRequestedGroupId(r.groupId); localStorage.setItem("pendingJoinRequest",r.groupId); toast("Beitrittswunsch gesendet ✓"); return; }
     localStorage.setItem("currentGroupId",r.groupId);
-    toast("Team beigetreten ✓");
+    toast(r.pending?"Beigetreten – die Trainer-Rolle bestätigt noch der Admin":"Team beigetreten ✓");
     setTimeout(()=>window.location.reload(),400);
   };
   const doRequestJoin=async()=>{
     if(!selectedGroupId) return;
     setBusy(true);
-    const r=await requestToJoinGroup(user,selectedGroupId,role);
+    const r=await joinGroupOpen(user,selectedGroupId,roles);
     setBusy(false);
-    if(r.ok){ setRequestedGroupId(selectedGroupId); localStorage.setItem("pendingJoinRequest",selectedGroupId); toast("Beitrittswunsch gesendet ✓"); }
-    else toast("Fehler: "+r.error,"err");
+    if(!r.ok){ toast("Fehler: "+r.error,"err"); return; }
+    if(r.joined||r.already){ localStorage.setItem("currentGroupId",selectedGroupId); toast(r.pending?"Beigetreten – die Trainer-Rolle bestätigt noch der Admin":"Team beigetreten ✓"); setTimeout(()=>window.location.reload(),500); return; }
+    setRequestedGroupId(selectedGroupId); localStorage.setItem("pendingJoinRequest",selectedGroupId); toast("Beitrittswunsch gesendet ✓");
   };
   const cancelRequest=async()=>{
     await cancelJoinRequest(user,requestedGroupId);
@@ -6084,8 +6220,8 @@ function GroupOnboarding({user, onLogout, toast}) {
         style={{width:"100%",padding:"10px 14px",border:`1.5px solid ${C.border}`,borderRadius:10,fontSize:16,letterSpacing:2,textAlign:"center",color:C.text,background:C.bg,outline:"none",fontFamily:"inherit",textTransform:"uppercase"}}/>
       <button onClick={doJoinCode} disabled={busy||!code.trim()} style={{marginTop:14,width:"100%",padding:"12px",borderRadius:10,border:"none",background:busy||!code.trim()?"#94a3b8":C.primary,color:"white",fontWeight:800,fontSize:14,cursor:busy||!code.trim()?"default":"pointer",fontFamily:"inherit"}}>{busy?"Prüfe...":"Beitreten"}</button>
       <div style={{fontWeight:800,fontSize:13,color:C.text,margin:"14px 0 8px"}}>Ich bin …</div>
-      <RolePicker value={role} onChange={setRole}/>
-      <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>Den Code bekommst du von deinem Trainer. {role==="trainer"?"Trainer müssen vom Admin bestätigt werden.":"Der Beitritt erfolgt sofort."}</div>
+      <RolePicker value={roles} onChange={setRoles}/>
+      <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>Den Code bekommst du von deinem Trainer. {roles.includes("trainer")?"Die Trainer-Rolle bestätigt der Admin, alles andere gilt sofort.":"Der Beitritt erfolgt sofort."}</div>
     </div>:<div>
       {allGroups.length===0?<div style={{fontSize:13,color:C.muted,textAlign:"center",padding:"10px 0"}}>Noch keine Teams vorhanden.</div>:<>
         <select value={selectedGroupId} onChange={e=>setSelectedGroupId(e.target.value)}
@@ -6093,10 +6229,10 @@ function GroupOnboarding({user, onLogout, toast}) {
           <option value="">— Team wählen —</option>
           {allGroups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
         </select>
-        <button onClick={doRequestJoin} disabled={busy||!selectedGroupId} style={{marginTop:14,width:"100%",padding:"12px",borderRadius:10,border:"none",background:busy||!selectedGroupId?"#94a3b8":C.primary,color:"white",fontWeight:800,fontSize:14,cursor:busy||!selectedGroupId?"default":"pointer",fontFamily:"inherit"}}>{busy?"Sende...":"Beitritt anfragen"}</button>
+        <button onClick={doRequestJoin} disabled={busy||!selectedGroupId} style={{marginTop:14,width:"100%",padding:"12px",borderRadius:10,border:"none",background:busy||!selectedGroupId?"#94a3b8":C.primary,color:"white",fontWeight:800,fontSize:14,cursor:busy||!selectedGroupId?"default":"pointer",fontFamily:"inherit"}}>{busy?"Bitte warten…":"Beitreten"}</button>
         <div style={{fontWeight:800,fontSize:13,color:C.text,margin:"14px 0 8px"}}>Ich bin …</div>
-        <RolePicker value={role} onChange={setRole}/>
-        <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>Der Admin dieses Teams muss deinen Beitritt bestätigen.</div>
+        <RolePicker value={roles} onChange={setRoles}/>
+        <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>{allGroups.find(g=>g.id===selectedGroupId)?.openJoin===false?"Dieses Team ist geschlossen: Dein Beitrittswunsch geht an den Admin.":"Eltern und Spieler treten sofort bei. Die Trainer-Rolle bestätigt der Admin."}</div>
       </>}
     </div>}
   </Shell>;
@@ -6281,15 +6417,15 @@ export default function App() {
     if(!p||!p.code) return;
     localStorage.removeItem("pendingJoin");
     (async()=>{
-      const r=await joinGroupByCode(user,p.code,p.role||"eltern");
+      const r=await joinGroupByCode(user,p.code,p.roles||p.role||"eltern");
       if(!r.ok){ toast(r.error==="invalid-code"?"Einladungscode ungültig":"Beitritt fehlgeschlagen: "+r.error,"err"); return; }
-      if(r.pending){
+      if(r.pending&&!r.joined&&!r.already){
         toast("Beitrittswunsch als Trainer gesendet – der Admin muss noch bestätigen");
         if(memberships.length===0){ localStorage.setItem("pendingJoinRequest",r.groupId); setTimeout(()=>window.location.reload(),800); }
         return;
       }
       localStorage.setItem("currentGroupId",r.groupId);
-      toast(r.already?"Du bist bereits in diesem Team":"Team beigetreten ✓");
+      toast(r.already?"Du bist bereits in diesem Team":(r.pending?"Beigetreten – die Trainer-Rolle bestätigt noch der Admin":"Team beigetreten ✓"));
       setTimeout(()=>window.location.reload(),600);
     })();
   },[user,memberships]);
@@ -6307,6 +6443,10 @@ export default function App() {
   const upsert=(x)=>prev=>prev.find(e=>e.id===x.id)?prev.map(e=>e.id===x.id?x:e):[...prev,x];
   // Anmeldung: Termine, eigene Kinder, offene Antworten (nächste 6 Wochen)
   const rsvpPlayers=isCoachReal?players:(playersPub||[]);
+  // Eltern/Spieler ohne verknüpftes Kind bzw. Profil: erst auswählen (oder "Später")
+  const [childSkip,setChildSkip]=useState(false);
+  useEffect(()=>{ setChildSkip(!!(user?.uid&&currentGroupId&&localStorage.getItem(`childSkip_${user.uid}_${currentGroupId}`))); },[user?.uid,currentGroupId]);
+  const needsChildSetup=!!myMember&&!isCoachReal&&isFamily(role)&&!(myMember.childIds||[]).length&&!childSkip;
   const rsvpEvents=isCoachReal?buildRsvpEvents(sessions,tournaments):(eventsPub||[]).filter(e=>e.date>=todayISO());
   const myKids=(myMember?.childIds||[]).map(id=>rsvpPlayers.find(p=>p.id===id)).filter(p=>p&&p.active!==false);
   const rsvpHorizon=addDaysISO(todayISO(),RSVP_HORIZON_DAYS);
@@ -6369,6 +6509,7 @@ export default function App() {
     <Toasts/>
     <Nav page={page} setPage={setPage} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0,openRsvps}}/>
     <main className="gm" style={{display:"block",zoom:prefs.fontScale||1}}>
+      {needsChildSetup?<ChildSetupPage role={role} players={rsvpPlayers} groupId={currentGroupId} toast={toast} onSkip={()=>{try{localStorage.setItem(`childSkip_${user.uid}_${currentGroupId}`,"1");}catch(e){} setChildSkip(true);}}/>:<>
       {page==="start"&&isFamily(role)&&<ParentStartPage role={role} currentUser={user} events={rsvpEvents} myKids={myKids} rsvps={rsvps} openRsvps={openRsvps} onNavigate={setPage}/>}
       {page==="start"&&!isFamily(role)&&<StartPage players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} todos={todos} meetings={meetings} teamsets={teamsets} kassenbuch={kassenbuch} exercises={exercises} role={role} openRsvps={openRsvps} currentUser={user} onlineUsers={onlineUsers} onNavigate={setPage} onOpenLibraryCategory={cat=>{setPendingLibraryCat(cat);setPage("library");}} onOpenOrgaItem={target=>{setPendingOrgaTarget(target);setPage("orga");}} onOpenCalendarItem={target=>{setPendingCalendarTarget(target);setPage("calendar");}} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} onSaveExercise={saveEx} onDeleteExercise={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="library"  &&<LibraryPage  exercises={exercises} onSave={saveEx} onDelete={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} apiKey={apiKey} toast={toast} onlineUsers={onlineUsers} currentUser={user} initialCategory={pendingLibraryCat} onConsumeInitialCategory={()=>setPendingLibraryCat(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
@@ -6380,8 +6521,9 @@ export default function App() {
       {page==="calendar"&&!isFamily(role)&&<CalendarPage rsvps={rsvps} eventMeta={eventMeta} onSetDeadline={setDeadline} onSetRsvp={setRsvp} pendingSetup={pendingSetup} onClearPendingSetup={()=>setPendingSetup(null)} onOpenTurnierPage={()=>setPage("turnier")} recurringSlots={recurringSlots} onSaveSlot={saveSlot} onDeleteSlot={id=>{const i=recurringSlots.find(s=>s.id===id);setRecurringSlots(prev=>prev.filter(s=>s.id!==id));showUndo("Serientermin",i,()=>setRecurringSlots(prev=>[i,...prev]));}} onGenerateSessions={generateSessions} sessions={sessions} meetings={meetings} tournaments={tournaments} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} onSaveMeeting={saveMeeting} onDeleteMeeting={id=>{const i=meetings.find(m=>m.id===id);setMeetings(prev=>prev.filter(m=>m.id!==id));showUndo("Trainertreff",i,()=>setMeetings(prev=>[i,...prev]));}} onSaveTournament={saveTo} onSaveExercise={saveEx} apiKey={apiKey} toast={toast} readOnly={!can(role,"editAnything")} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} pendingTarget={pendingCalendarTarget} onClearPendingTarget={()=>setPendingCalendarTarget(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="log"&&can(role,"log")&&<ActivityPage entries={activity} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="kasse"    &&can(role,"kasse")&&<KassePage kassenbuch={kassenbuch} onSave={can(role,"editKasse")?saveKa:null} onDelete={can(role,"editKasse")?id=>{const i=kassenbuch.find(k=>k.id===id);setKassenbuch(prev=>prev.filter(k=>k.id!==id));showUndo("Eintrag",i,()=>setKassenbuch(prev=>[i,...prev]));}:null} readOnly={!can(role,"editKasse")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
-      {page==="settings"&&isFamily(role)&&<ParentSettingsPage role={role} memberships={memberships} onSwitchGroup={switchGroup} firebaseUser={user} groupId={currentGroupId} myKids={myKids} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onLogout={logout} toast={toast} onlineUsers={onlineUsers}/>}
+      {page==="settings"&&isFamily(role)&&<ParentSettingsPage role={role} players={rsvpPlayers} memberships={memberships} onSwitchGroup={switchGroup} firebaseUser={user} groupId={currentGroupId} myKids={myKids} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onLogout={logout} toast={toast} onlineUsers={onlineUsers}/>}
       {(can(role,"settings")||role==="trainer")&&page==="settings"&&<SettingsPage key={role} onCreatePlayer={createPlayerProfile} exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={switchGroup} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
+    </>}
     </main>
     {undoBuf&&<div style={{position:"fixed",bottom:76,left:12,right:12,zIndex:9999,display:"flex",alignItems:"center",gap:10,background:"#1e293b",color:"white",borderRadius:12,padding:"12px 16px",boxShadow:"0 4px 24px rgba(0,0,0,.35)"}}>
       <span style={{fontSize:13,fontWeight:600,flex:1}}>{undoBuf.label}</span>

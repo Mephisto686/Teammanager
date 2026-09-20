@@ -106,3 +106,98 @@ exports.deleteUserAccount = onCall({ region: "europe-west1" }, async (request) =
   console.log(`deleteUserAccount: ${uid} gelöscht durch ${callerUid}`);
   return { ok: true, uid };
 });
+
+/**
+ * claimChildren: Eltern/Spieler ordnen sich direkt nach dem Beitritt ihrem Kind bzw. Spielerprofil zu.
+ *
+ * Eingabe: { groupId, existingIds: [Spieler-IDs aus der Liste], newNames: [Namen neuer Kinder] }
+ *  - vorhandene Profile werden mit dem Mitglied verknüpft (childIds)
+ *  - neue Kinder werden direkt in der Spielerliste des Teams angelegt (shared/players + shared/playersPublic)
+ *  - Ergebnis erscheint auch im Trainer-Log
+ * Nur für Mitglieder mit der Rolle "eltern" oder "spieler".
+ */
+const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
+
+exports.claimChildren = onCall({ region: "europe-west1" }, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Bitte anmelden.");
+  const uid = request.auth.uid;
+  const data = request.data || {};
+  const groupId = typeof data.groupId === "string" ? data.groupId : "";
+  if (!groupId) throw new HttpsError("invalid-argument", "Team fehlt.");
+
+  const existingIds = [...new Set((Array.isArray(data.existingIds) ? data.existingIds : []).filter((x) => typeof x === "string" && x))].slice(0, 10);
+  const seen = new Set();
+  const newNames = (Array.isArray(data.newNames) ? data.newNames : [])
+    .map((n) => (typeof n === "string" ? n.trim().replace(/\s+/g, " ").slice(0, 60) : ""))
+    .filter((n) => n && !seen.has(n.toLowerCase()) && seen.add(n.toLowerCase()))
+    .slice(0, 5);
+  if (existingIds.length + newNames.length === 0) {
+    throw new HttpsError("invalid-argument", "Bitte ein Kind auswählen oder einen Namen eintragen.");
+  }
+
+  const memRef = db.doc(`groups/${groupId}/members/${uid}`);
+  const memSnap = await memRef.get();
+  if (!memSnap.exists) throw new HttpsError("permission-denied", "Du bist kein Mitglied dieses Teams.");
+  const member = memSnap.data();
+  const roles = memberRoles(member);
+  const isParent = roles.includes("eltern");
+  const isPlayer = roles.includes("spieler");
+  if (!isParent && !isPlayer) {
+    throw new HttpsError("permission-denied", "Nur Eltern und Spieler können sich mit einem Kind bzw. Profil verknüpfen.");
+  }
+  const playerOnly = isPlayer && !isParent;
+  const already = Array.isArray(member.childIds) ? member.childIds : [];
+  if (playerOnly && already.length + existingIds.filter((x) => !already.includes(x)).length + newNames.length > 1) {
+    throw new HttpsError("failed-precondition", "Als Spieler kannst du nur mit einem Profil verknüpft sein.");
+  }
+
+  const playersRef = db.doc(`groups/${groupId}/shared/players`);
+  const pubRef = db.doc(`groups/${groupId}/shared/playersPublic`);
+  const who = member.name || member.email || "Ein Mitglied";
+
+  const result = await db.runTransaction(async (tx) => {
+    const [pSnap, pubSnap] = await Promise.all([tx.get(playersRef), tx.get(pubRef)]);
+    const items = pSnap.exists && Array.isArray(pSnap.data().items) ? pSnap.data().items : [];
+    const pubItems = pubSnap.exists && Array.isArray(pubSnap.data().items) ? pubSnap.data().items : [];
+
+    // Vorhandene Profile müssen es wirklich geben (und aktiv sein)
+    const linkedExisting = existingIds.map((id) => items.find((p) => p && p.id === id));
+    if (linkedExisting.some((p) => !p || p.active === false)) {
+      throw new HttpsError("not-found", "Ein gewähltes Kind gibt es nicht mehr. Bitte Liste neu laden.");
+    }
+
+    // Neue Kinder anlegen (Namen, die es schon gibt, werden nicht doppelt angelegt)
+    const created = [];
+    for (const n of newNames) {
+      const dup = items.find((p) => p && p.active !== false && (p.name || "").trim().toLowerCase() === n.toLowerCase());
+      if (dup) { if (!existingIds.includes(dup.id)) existingIds.push(dup.id); continue; }
+      created.push({
+        id: newId(), name: n, birthYear: 2019, birthDate: "", strength: 1, active: true, jersey: "", notes: "",
+        vereinsmitglied: false, spielerpass: false,
+        contacts: isParent && member.email ? [{ name: who, relation: "Elternteil", phone: "", email: member.email, address: "" }] : [],
+      });
+    }
+    if (created.length) {
+      tx.set(playersRef, { items: [...items, ...created], updatedAt: new Date().toISOString() });
+      tx.set(pubRef, {
+        items: [...pubItems, ...created.map((p) => ({ id: p.id, name: p.name, active: true }))],
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    const childIds = [...new Set([...already, ...existingIds, ...created.map((p) => p.id)])];
+    tx.set(memRef, { childIds }, { merge: true });
+
+    // Log für Trainer/Admins (Stufe "coach"); Dokument-ID sortiert neueste zuerst wie in der App
+    const ms = Date.now();
+    const namesOf = [...linkedExisting.map((p) => p.name), ...created.map((p) => p.name)].join(", ");
+    const logRef = db.collection(`groups/${groupId}/log_coach`).doc(String(9999999999999 - ms).padStart(13, "0") + "_" + Math.random().toString(36).slice(2, 6));
+    tx.set(logRef, {
+      ms, ts: new Date(ms).toISOString(), uid, name: who, cat: "spieler",
+      text: `${who} hat sich mit ${namesOf || "einem Profil"} verknüpft${created.length ? ` (neu angelegt: ${created.map((p) => p.name).join(", ")})` : ""}`,
+    });
+    return { linked: childIds.length, created: created.map((p) => ({ id: p.id, name: p.name })) };
+  });
+
+  return { ok: true, ...result };
+});
