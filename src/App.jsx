@@ -491,14 +491,18 @@ function TeamSwitcher() {
 // Admin/Trainer/Eltern wechseln, Trainer mit verknüpftem Kind zwischen Trainer/Eltern.
 // Rein Ansicht: die echten Zugriffsrechte (Firestore Rules) ändern sich dadurch nicht.
 // ── EINLADUNGSLINK ────────────────────────────────────────────────
-const buildInviteLink = (code, roles=["eltern"]) =>
-  `${window.location.origin}${window.location.pathname}?join=${encodeURIComponent(code)}&r=${[].concat(roles).join(",")}`;
+// Ein Link für alle: Die Rolle wählt jeder beim Beitritt selbst. (Optionaler Parameter "r" nur für alte Links.)
+const buildInviteLink = (code, roles) =>
+  `${window.location.origin}${window.location.pathname}?join=${encodeURIComponent(code)}${roles&&roles.length?`&r=${[].concat(roles).join(",")}`:""}`;
 (function captureJoinLink(){
   try{
     const q=new URLSearchParams(window.location.search);
     const code=q.get("join");
     if(!code) return;
-    localStorage.setItem("pendingJoin",JSON.stringify({code:code.trim().toUpperCase(),roles:parseJoinRoles(q.get("r"))}));
+    const r=q.get("r");
+    const p={code:code.trim().toUpperCase()};
+    if(r) p.roles=parseJoinRoles(r); // ohne "r": Rolle wird nach der Anmeldung bzw. bei der Registrierung gewählt
+    localStorage.setItem("pendingJoin",JSON.stringify(p));
     window.history.replaceState(null,"",window.location.pathname+window.location.hash);
   }catch(e){}
 })();
@@ -734,7 +738,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.43.1";
+const APP_VERSION = "3.44.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4658,11 +4662,10 @@ async function setInviteExpiry(groupId, code, days) {
 
 // ── EINLADUNG: Link + Code teilen (Admin & Trainer) ───────────────
 function InviteCard({code,toast,groupId,expiresAtMs,user}) {
-  const [roles,setRoles]=useState(["eltern"]);
   const [busy,setBusy]=useState(false);
   const expired=!!expiresAtMs&&Date.now()>expiresAtMs;
   const [days,setDays]=useState(()=>!expiresAtMs?0:((expiresAtMs-Date.now())/86400000>8?30:7));
-  const link=buildInviteLink(code,roles);
+  const link=buildInviteLink(code);
   const fmt=ms=>new Date(ms).toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit",year:"numeric"});
   const copy=(txt,label)=>{ if(navigator.clipboard) navigator.clipboard.writeText(txt).then(()=>toast(label+" kopiert ✓")); else toast("Kopieren nicht möglich","warn"); };
   const share=async()=>{
@@ -4686,15 +4689,14 @@ function InviteCard({code,toast,groupId,expiresAtMs,user}) {
   return(<div style={{marginBottom:16,padding:"14px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${expired?"#fca5a5":C.border}`}}>
     <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:10}}>🔗 Einladung</div>
     {expired&&<div style={{fontSize:12,fontWeight:700,color:"#b91c1c",background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,padding:"8px 10px",marginBottom:10}}>⛔ Dieser Code ist seit {fmt(expiresAtMs)} abgelaufen. Erzeuge unten einen neuen Code.</div>}
-    <div style={{fontSize:12,fontWeight:700,color:C.muted,marginBottom:6}}>Einladen als</div>
-    <RolePicker value={roles} onChange={setRoles}/>
-    <div style={{marginTop:10,padding:"9px 12px",borderRadius:8,background:C.bg,border:`1.5px solid ${C.border}`,fontSize:12,color:C.text,wordBreak:"break-all"}}>{link}</div>
+    <div style={{fontSize:13,color:C.muted,marginBottom:8}}>Ein Link für alle: Eltern, Spieler und Trainer wählen ihre Rolle beim Beitritt selbst.</div>
+    <div style={{padding:"9px 12px",borderRadius:8,background:C.bg,border:`1.5px solid ${C.border}`,fontSize:12,color:C.text,wordBreak:"break-all"}}>{link}</div>
     <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:10}}>
       <button onClick={()=>copy(link,"Link")} style={btn}>🔗 Link kopieren</button>
       <button onClick={share} style={{...btn,background:"#0ea5e9"}}>📤 Teilen</button>
     </div>
     <div style={{fontSize:12,color:C.muted,marginTop:12}}>Oder Code weitergeben: <b style={{letterSpacing:2,fontSize:14,color:C.text}}>{code}</b> <button onClick={()=>copy(code,"Code")} style={{marginLeft:6,padding:"3px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:C.card,color:C.text,fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>Kopieren</button></div>
-    <div style={{fontSize:11,color:C.muted,marginTop:8}}>{roles.includes("trainer")?"Die Trainer-Rolle bestätigt nach der Anmeldung der Admin. Eltern und Spieler treten sofort bei und wählen ihr Kind bzw. Spielerprofil selbst aus.":"Eltern und Spieler treten sofort bei und wählen ihr Kind bzw. Spielerprofil danach selbst aus."}</div>
+    <div style={{fontSize:11,color:C.muted,marginTop:8}}>Eltern und Spieler sind sofort dabei und wählen danach ihr Kind bzw. Spielerprofil aus. Die Trainer-Rolle bestätigt ein Admin.</div>
     <div style={{marginTop:14,paddingTop:12,borderTop:`1px solid ${C.border}`}}>
       <div style={{fontSize:12,color:expired?"#b91c1c":C.muted,marginBottom:8}}>{expiresAtMs?(expired?`Abgelaufen seit ${fmt(expiresAtMs)}`:`⏳ Gültig bis ${fmt(expiresAtMs)}`):"♾ Unbegrenzt gültig"}</div>
       <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
@@ -4967,6 +4969,20 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
       </div>
     </Modal>}
   </div>);
+}
+
+// Einladung ohne vorab gewählte Rolle (z. B. bei Anmeldung mit vorhandenem Konto oder Google): einmal nachfragen
+function JoinRolePrompt({onConfirm,onCancel}) {
+  const [roles,setRoles]=useState(["eltern"]);
+  return(<Modal title="Einladung zum Team" onClose={onCancel}>
+    <div style={{fontSize:13,color:C.muted,marginBottom:12}}>Du wurdest zu einem Team eingeladen. Als was möchtest du beitreten?</div>
+    <RolePicker value={roles} onChange={setRoles}/>
+    <div style={{fontSize:11,color:C.muted,marginTop:8}}>{roles.includes("trainer")?"Die Trainer-Rolle bestätigt ein Admin, alles andere gilt sofort.":"Der Beitritt erfolgt sofort."}</div>
+    <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}>
+      <Btn variant="secondary" onClick={onCancel}>Abbrechen</Btn>
+      <Btn onClick={()=>onConfirm(roles)} disabled={!roles.length}>Beitreten</Btn>
+    </div>
+  </Modal>);
 }
 
 // Nutzer ohne Namen (z. B. Konto vor Einführung der Namen angelegt oder Registrierung ohne Namen): einmal nachfragen
@@ -6774,14 +6790,12 @@ export default function App() {
     window.addEventListener("cloud-write-error",onErr); window.addEventListener("cloud-write-warn",onWarn);
     return ()=>{window.removeEventListener("cloud-write-error",onErr);window.removeEventListener("cloud-write-warn",onWarn);};
   },[]); // eslint-disable-line
-  // Einladungslink/-code, der vor der Anmeldung gemerkt wurde: nach dem Login automatisch beitreten
-  useEffect(()=>{
-    if(!user||memberships===null) return;
-    let p=null; try{ p=JSON.parse(localStorage.getItem("pendingJoin")||"null"); }catch(e){}
-    if(!p||!p.code) return;
-    localStorage.removeItem("pendingJoin");
+  // Einladungslink/-code, der vor der Anmeldung gemerkt wurde: nach dem Login beitreten.
+  // Hat die Person ihre Rolle schon bei der Registrierung gewählt, geht es sofort los – sonst wird einmal nachgefragt.
+  const [joinPrompt,setJoinPrompt]=useState(null);
+  const runPendingJoin=(p,roles)=>{
     (async()=>{
-      const r=await joinGroupByCode(user,p.code,p.roles||p.role||"eltern");
+      const r=await joinGroupByCode(user,p.code,roles);
       if(!r.ok){ toast(r.error==="invalid-code"||r.error==="expired-code"?joinErrorText(r.error):"Beitritt fehlgeschlagen: "+r.error,"err"); return; }
       if(r.pending&&!r.joined&&!r.already){
         toast("Beitrittswunsch als Trainer gesendet – der Admin muss noch bestätigen");
@@ -6792,7 +6806,17 @@ export default function App() {
       toast(r.already?"Du bist bereits in diesem Team":(r.pending?"Beigetreten – die Trainer-Rolle bestätigt noch der Admin":"Team beigetreten ✓"));
       setTimeout(()=>window.location.reload(),600);
     })();
-  },[user,memberships]);
+  };
+  useEffect(()=>{
+    if(!user||memberships===null||joinPrompt) return;
+    let p=null; try{ p=JSON.parse(localStorage.getItem("pendingJoin")||"null"); }catch(e){}
+    if(!p||!p.code) return;
+    const roles=p.roles||p.role;
+    if(!roles||!roles.length){ setJoinPrompt(p); return; }
+    localStorage.removeItem("pendingJoin");
+    runPendingJoin(p,roles);
+  },[user,memberships]); // eslint-disable-line
+  const joinPromptEl=joinPrompt?<JoinRolePrompt onCancel={()=>{localStorage.removeItem("pendingJoin");setJoinPrompt(null);}} onConfirm={roles=>{localStorage.removeItem("pendingJoin");const p=joinPrompt;setJoinPrompt(null);runPendingJoin(p,roles);}}/>:null;
   // Lokal gefundene Übungen/Aufstellungen ins aktuelle Team übernehmen (nur neue, nach ID) – Rückgabe: Anzahl neu übernommener Einträge
   const restoreLocal=(col,items)=>{
     const before=col==="exercises"?exercises:teamsets;
@@ -6875,10 +6899,11 @@ export default function App() {
   if(globalRole===null||memberships===null) return <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg}}><div style={{textAlign:"center",color:C.muted}}><div style={{fontSize:40,marginBottom:12}}>⏳</div><div style={{fontWeight:700}}>Lade Berechtigungen...</div><div style={{fontSize:12,marginTop:8}}>Falls dies länger dauert, bitte neu laden</div></div></div>;
   // In keiner Gruppe? → Onboarding (Team anlegen oder beitreten). Jeder eingeloggte Nutzer landet hier,
   // niemand wird mehr global blockiert.
-  if(memberships.length===0||!currentGroupId) return <GroupOnboarding user={user} onLogout={logout} toast={toast}/>;
+  if(memberships.length===0||!currentGroupId) return <><GroupOnboarding user={user} onLogout={logout} toast={toast}/>{joinPromptEl}</>;
   return(<RoleSwitchCtx.Provider value={{views:roleViews,viewRole:role,realRole,setViewRole,teams:(memberships||[]).map(m=>({id:m.groupId,name:allGroups.find(g=>g.id===m.groupId)?.name||m.groupId,role:m.role,roles:memberRoles(m)})),currentTeamId:currentGroupId,switchTeam:switchGroup,manageTeams:()=>setPage("settings"),logout}}><div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:C.bg,minHeight:"100vh"}}>
     <style>{`*{box-sizing:border-box}body{margin:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}`}</style>
     <Toasts/>
+    {joinPromptEl}
     {!!user&&!!myMember&&!user.displayName&&!myMember.name&&!nameSkipped&&<NamePrompt user={user} groupId={currentGroupId} toast={toast} onSkip={()=>{try{sessionStorage.setItem("nameSkipped","1");}catch(e){} setNameSkipped(true);}}/>}
     <Nav page={page} setPage={setPage} onLogout={logout} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0,openRsvps}}/>
     <main className="gm" style={{display:"block",zoom:prefs.fontScale||1}}>
