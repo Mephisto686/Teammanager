@@ -137,29 +137,35 @@ async function createGroup(user, name) {
   } catch (e) { return { ok: false, error: e.code || "unknown" }; }
 }
 
-// Sofortiger Beitritt per Einladungscode — landet immer als Rolle "eltern"
-// (Admin kann danach in der Nutzerverwaltung hochstufen)
-async function joinGroupByCode(user, code) {
+// Beitritt per Einladungscode. Eltern/Spieler treten sofort bei (Selbstbeitritt nur mit diesen Rollen),
+// Trainer stellen einen Beitrittswunsch, den der Admin bestätigen muss.
+async function joinGroupByCode(user, code, role = "eltern") {
   if (!fbDb || !user || !code?.trim()) return { ok: false, error: "invalid" };
   try {
     const codeSnap = await getDoc(doc(fbDb, "inviteCodes", code.trim().toUpperCase()));
     if (!codeSnap.exists()) return { ok: false, error: "invalid-code" };
     const groupId = codeSnap.data().groupId;
-    await setDoc(doc(fbDb, "groups", groupId, "members", user.uid), {
-      uid: user.uid, role: "eltern", name: user.displayName || "", email: user.email || "",
-      photo: user.photoURL || null, joinedAt: new Date().toISOString()
-    });
+    const memRef = doc(fbDb, "groups", groupId, "members", user.uid);
+    // Schon Mitglied (z. B. Admin öffnet Einladungslink): nichts überschreiben
+    if ((await getDoc(memRef)).exists()) return { ok: true, groupId, already: true };
+    const base = { uid: user.uid, name: user.displayName || "", email: user.email || "", photo: user.photoURL || null };
+    if (role === "trainer") {
+      await setDoc(doc(fbDb, "groups", groupId, "joinRequests", user.uid), { ...base, requestedRole: "trainer", requestedAt: new Date().toISOString() });
+      return { ok: true, groupId, pending: true };
+    }
+    await setDoc(memRef, { ...base, role: role === "spieler" ? "spieler" : "eltern", joinedAt: new Date().toISOString() });
     return { ok: true, groupId };
   } catch (e) { return { ok: false, error: e.code || "unknown" }; }
 }
 
 // Beitrittswunsch ohne Code — Admin der Zielgruppe muss aktiv bestätigen
-async function requestToJoinGroup(user, groupId) {
+async function requestToJoinGroup(user, groupId, role = "eltern") {
   if (!fbDb || !user) return { ok: false, error: "invalid" };
   try {
     await setDoc(doc(fbDb, "groups", groupId, "joinRequests", user.uid), {
       uid: user.uid, name: user.displayName || "", email: user.email || "",
-      photo: user.photoURL || null, requestedAt: new Date().toISOString()
+      photo: user.photoURL || null, requestedAt: new Date().toISOString(),
+      requestedRole: role === "trainer" || role === "spieler" ? role : "eltern"
     });
     return { ok: true };
   } catch (e) { return { ok: false, error: e.code || "unknown" }; }
@@ -254,20 +260,20 @@ const USER_ROLES = {
   admin:   {label:"Admin",    color:"#dc2626",bg:"#fee2e2",emoji:"👑"},
   trainer: {label:"Trainer",  color:"#2563eb",bg:"#dbeafe",emoji:"🧑‍🏫"},
   eltern:  {label:"Eltern",   color:"#16a34a",bg:"#dcfce7",emoji:"👪"},
+  spieler: {label:"Spieler",  color:"#7c3aed",bg:"#ede9fe",emoji:"⚽"},
   pending: {label:"Ausstehend",color:"#92400e",bg:"#fef3c7",emoji:"⏳"},
   banned:  {label:"Gesperrt", color:"#64748b",bg:"#f1f5f9",emoji:"🚫"},
 };
+// Eltern und Spieler sehen dieselbe (reduzierte) App; Eltern sind mit Kindern verknüpft, Spieler mit dem eigenen Spielerprofil
+const isFamily = r => r==="eltern" || r==="spieler";
 const CAN = {
   // tabs visible
-  start:    ["admin","trainer","eltern"],
+  start:    ["admin","trainer","eltern","spieler"],
   library:  ["admin","trainer"],
   team:     ["admin","trainer"],
-  training: ["admin","trainer"],
-  calendar: ["admin","trainer"],
+  calendar: ["admin","trainer","eltern","spieler"],
   teamplaner:["admin","trainer"],
   turnier:  ["admin","trainer"],
-  anmeldung:["admin","trainer","eltern"],
-  termine:  ["eltern"],
   kasse:    ["admin","trainer"],
   orga:     ["admin","trainer"],
   settings: ["admin"],
@@ -395,6 +401,23 @@ function usePersonalSettings(userId) {
 // Stellt die tatsächliche und die angezeigte Rolle bereit. Admin darf zwischen
 // Admin/Trainer/Eltern wechseln, Trainer mit verknüpftem Kind zwischen Trainer/Eltern.
 // Rein Ansicht: die echten Zugriffsrechte (Firestore Rules) ändern sich dadurch nicht.
+// ── EINLADUNGSLINK ────────────────────────────────────────────────
+const buildInviteLink = (code, role="eltern") =>
+  `${window.location.origin}${window.location.pathname}?join=${encodeURIComponent(code)}&r=${role}`;
+(function captureJoinLink(){
+  try{
+    const q=new URLSearchParams(window.location.search);
+    const code=q.get("join");
+    if(!code) return;
+    const r=q.get("r");
+    localStorage.setItem("pendingJoin",JSON.stringify({code:code.trim().toUpperCase(),role:["eltern","spieler","trainer"].includes(r)?r:"eltern"}));
+    window.history.replaceState(null,"",window.location.pathname+window.location.hash);
+  }catch(e){}
+})();
+
+// Alte Seitennamen (gespeicherte Startseite, Verlauf) leiten auf die zusammengeführte Seite "Termine" um
+const PAGE_ALIASES = {training:"calendar",anmeldung:"calendar",termine:"calendar"};
+const normPage = p => (typeof p==="string" && PAGE_ALIASES[p]) || p;
 const RoleSwitchCtx = React.createContext(null);
 function RoleSwitcher() {
   const ctx = React.useContext(RoleSwitchCtx);
@@ -486,7 +509,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.27.2";
+const APP_VERSION = "3.30.1";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -687,7 +710,7 @@ const dlCsv = async (rows, cols, n, toast) => {
 };
 const exportExJson = (ex) => dlJson(
   {version:APP_VERSION, exportDate:now(), type:'exercises', exercises:[ex]},
-  `GJugend_Uebung_${ex.title.replace(/[^a-z0-9äöüÄÖÜ]/gi,'_').slice(0,30)}_${todayISO()}.json`
+  `Teammanager_Uebung_${ex.title.replace(/[^a-z0-9äöüÄÖÜ]/gi,'_').slice(0,30)}_${todayISO()}.json`
 );
 
 const buildExHtml = (ex) => {
@@ -720,7 +743,7 @@ ${ex.description?`<div class="sec"><h2>🎯 Ablauf</h2><div class="box">${ex.des
 ${ex.material?.length?`<div class="sec"><h2>📦 Material</h2><div class="chips">${ex.material.map(m=>`<span class="chip mat">📦 ${m}</span>`).join('')}</div></div>`:''}
 ${ex.tags?.length?`<div class="sec"><h2>🏷️ Tags</h2><div class="chips">${ex.tags.map(t=>`<span class="chip tag">${t}</span>`).join('')}</div></div>`:''}
 ${ex.notes?`<div class="sec"><h2>💬 Notizen & Varianten</h2><div class="box" style="font-style:italic">${ex.notes}</div></div>`:''}
-<div class="footer">G-Jugend Coach v${APP_VERSION} · Erstellt: ${new Date().toLocaleDateString('de-DE')}</div>
+<div class="footer">Teammanager v${APP_VERSION} · Erstellt: ${new Date().toLocaleDateString('de-DE')}</div>
 ${PDF_SCRIPT}</body></html>`;
 };
 
@@ -1205,7 +1228,7 @@ function LibraryPage({exercises,onSave,onDelete,apiKey,toast,onlineUsers,current
   const toggleSel=id=>setSelIds(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id]);
   const bulkExport=()=>{
     const sel=exercises.filter(e=>selIds.includes(e.id));
-    dlJson({version:APP_VERSION,exportDate:now(),type:"exercises",exercises:sel},`GJugend_Uebungen-Auswahl_${sel.length}-Eintraege_${todayISO()}.json`,toast);
+    dlJson({version:APP_VERSION,exportDate:now(),type:"exercises",exercises:sel},`Teammanager_Uebungen-Auswahl_${sel.length}-Eintraege_${todayISO()}.json`,toast);
   };
 
   const printExercises=(exList)=>{
@@ -1239,13 +1262,13 @@ function LibraryPage({exercises,onSave,onDelete,apiKey,toast,onlineUsers,current
     const css=`${PDF_CSS}`;
     const html=`<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>Übungen (${exList.length})</title><style>${css}</style></head><body>
       <h1 style="font-size:22px;margin:0 0 4px">Übungssammlung</h1>
-      <div style="font-size:13px;color:#6b7280;margin-bottom:20px;padding-bottom:12px;border-bottom:2px solid #e5e7eb">${exList.length} Übung${exList.length!==1?"en":""} · SC Sternschanze G-Jugend</div>
+      <div style="font-size:13px;color:#6b7280;margin-bottom:20px;padding-bottom:12px;border-bottom:2px solid #e5e7eb">${exList.length} Übung${exList.length!==1?"en":""} · Teammanager</div>
       ${exHtml}
-      <div class="footer">Erstellt mit G-Jugend Coach App · ${new Date().toLocaleDateString("de-DE")}</div>
+      <div class="footer">Erstellt mit Teammanager · ${new Date().toLocaleDateString("de-DE")}</div>
 ${PDF_SCRIPT}</body></html>`;
     const w=window.open("","_blank");
     if(w){w.document.write(html);w.document.close();setTimeout(()=>w.print(),500);}
-    else{saveFileSync(html,`GJugend_Uebungen_${todayISO()}.html`,"text/html");toast("Als HTML gespeichert – im Browser öffnen und drucken");}
+    else{saveFileSync(html,`Teammanager_Uebungen_${todayISO()}.html`,"text/html");toast("Als HTML gespeichert – im Browser öffnen und drucken");}
   };
 
   const handleImportJson=async e=>{
@@ -2159,7 +2182,7 @@ function printSession(s,exercises,toast) {
     }).join("");
     const teamsHtml2=fakeTeams.length?`<div style="margin-top:20px;border:1.5px solid #e2e8f0;border-radius:10px;overflow:hidden"><div style="background:#f0fdf4;padding:10px 16px;font-weight:800;font-size:14px;color:#166534">👥 Teams</div><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;padding:12px">${fakeTeams.map(t=>`<div style="border:1.5px solid #e2e8f0;border-radius:8px;padding:10px"><div style="font-weight:800;font-size:13px;color:#1d4ed8;margin-bottom:6px">${esc(t.name)}</div>${(t.players||[]).map(p=>`<div style="font-size:12px;padding:2px 0;border-bottom:1px solid #f1f5f9">${esc(p.name)}</div>`).join("")}</div>`).join("")}</div></div>`:"";
     const css=`${PDF_CSS}`;
-    const html=`<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>Trainingsplan ${esc(s.date)}</title><style>${css}</style></head><body><h1>Trainingsplan</h1><div class="meta">📅 ${esc(s.date)} · ⏱ ${fakePlan.totalMin} Min · 👥 ${fakePlan.kids} Kinder · 🧑‍🏫 ${fakePlan.coaches} Trainer${fakePlan.location?` · 📍 ${esc(fakePlan.location)}`:""}${fakePlan.breakMin>0?` · ⏸ ${fakePlan.breakMin} Min Pausen`:""}</div>${tlHtml}${rows}${teamsHtml2}<div class="footer">Erstellt mit G-Jugend Coach App · ${new Date().toLocaleDateString("de-DE")}</div>${PDF_SCRIPT}</body></html>`;
+    const html=`<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>Trainingsplan ${esc(s.date)}</title><style>${css}</style></head><body><h1>Trainingsplan</h1><div class="meta">📅 ${esc(s.date)} · ⏱ ${fakePlan.totalMin} Min · 👥 ${fakePlan.kids} Kinder · 🧑‍🏫 ${fakePlan.coaches} Trainer${fakePlan.location?` · 📍 ${esc(fakePlan.location)}`:""}${fakePlan.breakMin>0?` · ⏸ ${fakePlan.breakMin} Min Pausen`:""}</div>${tlHtml}${rows}${teamsHtml2}<div class="footer">Erstellt mit Teammanager · ${new Date().toLocaleDateString("de-DE")}</div>${PDF_SCRIPT}</body></html>`;
     const w=window.open("","_blank");
     if(w){w.document.write(html);w.document.close();w.onload=()=>setTimeout(()=>w.print(),300);setTimeout(()=>w.print(),800);}
     else{saveFileSync(html,"Trainingsplan_"+s.date+".html","text/html");toast("Als HTML gespeichert");}
@@ -2178,7 +2201,7 @@ function printSession(s,exercises,toast) {
   }).join("");
   const teamsHtml=(s.teams||[]).length?`<div style="margin-top:20px;border:1.5px solid #e2e8f0;border-radius:10px;page-break-inside:avoid"><div style="background:#f0fdf4;padding:10px 16px;font-weight:800;font-size:14px;color:#166534">👥 Teams</div><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;padding:12px">${(s.teams||[]).map(t=>`<div style="border:1px solid #e2e8f0;border-radius:8px;padding:10px"><div style="font-weight:800;font-size:13px;color:#1d4ed8;margin-bottom:6px">${esc(t.name)}</div>${(t.players||[]).map(p=>`<div style="font-size:12px;padding:2px 0;border-bottom:1px solid #f1f5f9">${esc(p.name)}</div>`).join("")}</div>`).join("")}</div></div>`:"";
   const css=`${PDF_CSS}`;
-  const html=`<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>Training ${s.date||""}</title><style>${css}</style></head><body><h1>Trainingsplan</h1><div class="meta">📅 ${esc(s.date)} · ⏱ ${s.duration} Min · 👥 ${s.participantCount||"–"} Kinder${s.location?` · 📍 ${esc(s.location)}`:""}</div>${teamsHtml}${ex.length?`<h2 style="font-size:16px;font-weight:800;margin:0 0 12px">📚 Übungen (${ex.length})</h2>${exHtml}`:`<p style="color:#9ca3af">Keine Übungen verknüpft.</p>`}<div class="footer">Erstellt mit G-Jugend Coach App · ${new Date().toLocaleDateString("de-DE")}</div>${PDF_SCRIPT}</body></html>`;
+  const html=`<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>Training ${s.date||""}</title><style>${css}</style></head><body><h1>Trainingsplan</h1><div class="meta">📅 ${esc(s.date)} · ⏱ ${s.duration} Min · 👥 ${s.participantCount||"–"} Kinder${s.location?` · 📍 ${esc(s.location)}`:""}</div>${teamsHtml}${ex.length?`<h2 style="font-size:16px;font-weight:800;margin:0 0 12px">📚 Übungen (${ex.length})</h2>${exHtml}`:`<p style="color:#9ca3af">Keine Übungen verknüpft.</p>`}<div class="footer">Erstellt mit Teammanager · ${new Date().toLocaleDateString("de-DE")}</div>${PDF_SCRIPT}</body></html>`;
   const w=window.open("","_blank");
   if(w){w.document.write(html);w.document.close();w.onload=()=>setTimeout(()=>w.print(),300);setTimeout(()=>w.print(),800);}
   else{saveFileSync(html,"Training_"+s.date+".html","text/html");toast("Als HTML gespeichert");}
@@ -2853,7 +2876,7 @@ function MeetingForm({m,onSave,onClose}) {
 }
 
 // ── KALENDER (vereinheitlichte Terminübersicht) ─────────────────
-function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,onSaveSession,onDeleteSession,onSavePlayer,onSaveMeeting,onDeleteMeeting,onSaveTournament,onSaveExercise,apiKey,toast,readOnly,onOpenTournament,pendingTarget,onClearPendingTarget,onlineUsers,currentUser,onGoHome,onGoBack}) {
+function CalendarPage({rsvps={},onSetRsvp,recurringSlots,onSaveSlot,onDeleteSlot,onGenerateSessions,pendingSetup,onClearPendingSetup,onOpenTurnierPage,sessions,meetings,tournaments,players,coaches,exercises,onSaveSession,onDeleteSession,onSavePlayer,onSaveMeeting,onDeleteMeeting,onSaveTournament,onSaveExercise,apiKey,toast,readOnly,onOpenTournament,pendingTarget,onClearPendingTarget,onlineUsers,currentUser,onGoHome,onGoBack}) {
   const todayStr=todayISO();
   // Typ-Filter: Klick auf einen Typ zeigt NUR diesen Typ; erneuter Klick (oder "Alle") zeigt wieder alles
   const [typeFilter,setTypeFilter]=useState("all"); // all | training | spieltag | treffen
@@ -2863,13 +2886,16 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
   const [showPast,setShowPast]=useState(false);
   const [monthCursor,setMonthCursor]=useState(todayStr.slice(0,7)); // "YYYY-MM"
   const [selectedDay,setSelectedDay]=useState(todayStr);
-  const [modal,setModal]=useState(null);
+  const [modal,setModal]=useState(()=>pendingSetup?{type:"setup",setup:pendingSetup}:null);
+  useEffect(()=>{if(pendingSetup){setModal({type:"setup",setup:pendingSetup});onClearPendingSetup?.();}},[]); // eslint-disable-line
 
   useEffect(()=>{
     if(!pendingTarget){return;}
     if(pendingTarget.type==="training"){
       const s=sessions.find(x=>x.id===pendingTarget.id);
       if(s)setModal(isSessionPlanned(s)?{type:"sessionDetail",data:s}:{type:"setup",continueSessionId:s.id});
+    }else if(pendingTarget.type==="newTraining"){
+      setModal({type:"setup"});
     }else if(pendingTarget.type==="meeting"){
       const m=meetings.find(x=>x.id===pendingTarget.id);
       if(m)setModal({type:"meetingDetail",data:m});
@@ -2932,7 +2958,7 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
       onOpenTournament(it.raw.id);
     }
   };
-  const renderItem=it=>{
+  const renderItemBase=it=>{
     if(it.type==="training"){
       const s=it.raw;
       const pr=(s.playerIds||[]).map(gP).filter(Boolean),tr=(s.coachIds||[]).map(gC).filter(Boolean),ex=(s.exerciseIds||[]).map(gE).filter(Boolean);
@@ -2973,6 +2999,14 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
     </div>);
   };
 
+  // Trainings & Spieltage in der Zukunft bekommen die Anmeldung (Zu-/Absagen) direkt unter dem Termin
+  const renderItem=it=>{
+    const card=renderItemBase(it);
+    if(!onSetRsvp||readOnly||it.date<todayStr||(it.type!=="training"&&it.type!=="spieltag")||(it.type==="training"&&it.raw.isDraft)) return card;
+    const ev={key:(it.type==="training"?"tr-":"tn-")+it.raw.id,type:it.type==="training"?"training":"turnier",date:it.date};
+    return(<div key={it.id}>{card}<RsvpInline ev={ev} players={players} rsvps={rsvps} onSetRsvp={onSetRsvp} toast={toast}/></div>);
+  };
+
   return(<div>
     <PageHeader title="Termine" sub={`${items.length} Termine`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
     <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12,alignItems:"center",justifyContent:"space-between"}}>
@@ -2987,8 +3021,11 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
         <button onClick={()=>setView("month")} style={{padding:"7px 14px",borderRadius:8,border:"none",cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"inherit",background:view==="month"?C.primary:"transparent",color:view==="month"?"white":C.muted}}>🗓 Kalender</button>
       </div>
     </div>
-    {!readOnly&&<div style={{marginBottom:16}}>
+    {!readOnly&&<div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
       <Btn onClick={()=>setModal({type:"eventType"})}><Plus size={14}/> Neuer Termin</Btn>
+      <Btn sm variant="secondary" onClick={()=>setModal({type:"slots"})}>🔁 Trainingszeiten</Btn>
+      {onOpenTurnierPage&&<Btn sm variant="secondary" onClick={onOpenTurnierPage}>🏆 Turniere verwalten</Btn>}
+      <Btn sm onClick={()=>setModal({type:"notfall"})} style={{background:"#dc2626",color:"white"}}><AlertTriangle size={14}/> SOS</Btn>
     </div>}
     {items.length===0?<Empty icon="🗓" title="Noch keine Termine" sub="Trainings, Trainertreffen und Turniere erscheinen hier, sobald sie angelegt sind."/>:
       view==="list"?
@@ -3040,8 +3077,10 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
       </div>}
 
     {modal?.type==="sessionDetail"&&modal.data&&<Modal title={fmtDate(modal.data.date)} onClose={()=>setModal(null)} wide><SessionDetailView s={modal.data} players={players} coaches={coaches} exercises={exercises} onDelete={()=>{onDeleteSession(modal.data.id);setModal(null);}} onClose={()=>setModal(null)} onSaveSession={onSaveSession} onPrint={()=>printSession(modal.data,exercises,toast)} onReplan={()=>setModal({type:"setup",continueSessionId:modal.data.id})}/></Modal>}
-    {modal?.type==="setup"&&<Modal title="Training planen" onClose={()=>setModal(null)} wide><NewTrainingWizard sessions={sessions} players={players} exercises={exercises} initialSessionId={modal.continueSessionId} startStep={modal.continueSessionId?2:1} onSaveSession={s=>{onSaveSession(s);setModal(null);toast("Training gespeichert");}} onSavePlayer={onSavePlayer} onClose={()=>setModal(null)}/></Modal>}
+    {modal?.type==="setup"&&<Modal title="Training planen" onClose={()=>setModal(null)} wide><NewTrainingWizard sessions={sessions} players={players} exercises={exercises} initialSetup={modal.setup} initialSessionId={modal.continueSessionId} startStep={modal.continueSessionId?2:1} onSaveSession={s=>{onSaveSession(s);setModal(null);toast("Training gespeichert");}} onSavePlayer={onSavePlayer} onClose={()=>setModal(null)}/></Modal>}
     {modal?.type==="meetingDetail"&&modal.data&&<Modal title={modal.data.title||"Trainertreff"} onClose={()=>setModal(null)} wide><MeetingCard m={modal.data} initialOpen onEdit={()=>setModal({type:"meetingForm",data:modal.data})} onDel={()=>{onDeleteMeeting(modal.data.id);setModal(null);}} onSave={m=>{onSaveMeeting(m);setModal({type:"meetingDetail",data:m});}} readOnly={readOnly}/></Modal>}
+    {modal?.type==="slots"&&<Modal title="Trainingszeiten" onClose={()=>setModal(null)} wide><RecurringSlotsTab slots={recurringSlots||[]} sessions={sessions} onSaveSlot={onSaveSlot} onDeleteSlot={onDeleteSlot} onGenerateSessions={onGenerateSessions} toast={toast}/></Modal>}
+    {modal?.type==="notfall"&&<Modal title="🚨 SOS-Notfall-Plan" onClose={()=>setModal(null)} wide><NotfallModal exercises={exercises} onClose={()=>setModal(null)}/></Modal>}
     {modal?.type==="eventType"&&<Modal title="Neuer Termin" onClose={()=>setModal(null)}>
       <div style={{fontSize:13,color:C.muted,marginBottom:16}}>Was für ein Termin soll angelegt werden?</div>
       <div style={{display:"flex",flexDirection:"column",gap:10}}>
@@ -3065,64 +3104,6 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
 }
 
 // ── TRAINING PAGE ─────────────────────────────────────────────────
-function TrainingPage({sessions,players,coaches,exercises,onSaveSession,onDeleteSession,onSavePlayer,apiKey,toast,onSaveExercise,pendingSetup,onClearPendingSetup,onlineUsers,currentUser,onGoHome,onGoBack,onGoToCalendar,recurringSlots,onSaveSlot,onDeleteSlot,onGenerateSessions}) {
-  const [modal,setModal]=useState(()=>pendingSetup?{type:"setup",setup:pendingSetup}:null);
-  useEffect(()=>{if(pendingSetup){setModal({type:"setup",setup:pendingSetup});onClearPendingSetup?.();}},[]);
-  const todayStr=todayISO();
-  const gP=id=>players.find(p=>p.id===id),gC=id=>coaches.find(c=>c.id===id),gE=id=>exercises.find(e=>e.id===id);
-  const next5=[...sessions].filter(s=>s.date>=todayStr).sort((a,b)=>a.date.localeCompare(b.date)||(a.time||"").localeCompare(b.time||"")).slice(0,5);
-  const WEEKDAY_ADVERB={1:"Montags",2:"Dienstags",3:"Mittwochs",4:"Donnerstags",5:"Freitags",6:"Samstags",7:"Sonntags"};
-  const sortedSlots=[...(recurringSlots||[])].sort((a,b)=>a.weekday-b.weekday||(a.time||"").localeCompare(b.time||""));
-
-  const renderRow=s=>{
-    const pr=(s.playerIds||[]).map(gP).filter(Boolean),ex=(s.exerciseIds||[]).map(gE).filter(Boolean);
-    const kids=s.participantCount?Number(s.participantCount):pr.length;
-    const planned=isSessionPlanned(s);
-    return(<div key={s.id} onClick={()=>setModal(planned?{type:"sessionDetail",data:s}:{type:"setup",continueSessionId:s.id})} style={{display:"flex",alignItems:"center",gap:10,background:C.card,borderRadius:12,border:`1.5px solid ${s.isDraft?"#fde047":C.border}`,padding:"12px 16px",cursor:"pointer",marginBottom:8}}>
-      <div style={{width:40,height:40,borderRadius:10,background:"#eff6ff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>📅</div>
-      <div style={{flex:1,minWidth:0}}>
-        <div style={{fontWeight:800,fontSize:14,color:C.text,display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-          {fmtDate(s.date)}{s.time?` · ${s.time} Uhr`:""}
-          <span style={{fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:20,background:planned?"#dcfce7":"#fef3c7",color:planned?"#16a34a":"#b45309"}}>{planned?"✅ Geplant":"🕒 Ungeplant"}</span>
-        </div>
-        <div style={{fontSize:12,color:C.muted,marginTop:2}}>⏱ {s.duration} Min{kids>0?` · 👥 ${kids}`:""}{s.location?` · 📍 ${s.location}`:""}{ex.length>0?` · ${ex.length} Übung${ex.length!==1?"en":""}`:""}</div>
-      </div>
-    </div>);
-  };
-
-  return(<div>
-    <PageHeader title="Training" sub="Nächste Trainings & Serientermine" onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
-
-    <div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"14px 16px",marginBottom:20}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:sortedSlots.length>0?10:0}}>
-        <div style={{fontWeight:800,fontSize:14,color:C.text}}>🔁 Trainingszeiten</div>
-        <button onClick={()=>setModal({type:"slots"})} title="Trainingszeiten bearbeiten" style={{background:"none",border:`1.5px solid ${C.border}`,borderRadius:8,padding:"5px 10px",cursor:"pointer",color:C.text,display:"flex",alignItems:"center",gap:4,fontSize:12,fontWeight:700,fontFamily:"inherit"}}><Edit2 size={13}/> Bearbeiten</button>
-      </div>
-      {sortedSlots.length===0?<div style={{fontSize:13,color:C.muted}}>Noch keine festen Trainingszeiten hinterlegt.</div>:
-        <div style={{display:"flex",flexDirection:"column",gap:4}}>
-          {sortedSlots.map(s=><div key={s.id} style={{fontSize:15,color:C.text,fontWeight:700}}>{WEEKDAY_ADVERB[s.weekday]} {s.time||"–"} Uhr{s.location?<span style={{color:C.muted,fontWeight:400}}> · {s.location}</span>:null}</div>)}
-        </div>}
-    </div>
-
-    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
-      <Btn onClick={()=>setModal({type:"notfall"})} style={{background:"#dc2626",color:"white"}} sm><AlertTriangle size={14}/> SOS</Btn>
-      <Btn onClick={()=>setModal({type:"setup"})}><CalendarDays size={16}/> Neues Training</Btn>
-    </div>
-
-    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:10}}>
-      <div style={{fontWeight:800,fontSize:15,color:C.text}}>Nächste Trainings</div>
-      {onGoToCalendar&&<button onClick={onGoToCalendar} style={{background:"none",border:"none",color:C.primary,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>Alle anzeigen →</button>}
-    </div>
-    {next5.length===0?<div style={{color:C.muted,fontSize:13,marginBottom:20}}>Keine anstehenden Trainings.</div>:
-      <div style={{marginBottom:24}}>{next5.map(renderRow)}</div>}
-
-    {modal?.type==="slots"&&<Modal title="Trainingszeiten" onClose={()=>setModal(null)} wide><RecurringSlotsTab slots={recurringSlots||[]} sessions={sessions} onSaveSlot={onSaveSlot} onDeleteSlot={onDeleteSlot} onGenerateSessions={onGenerateSessions} toast={toast}/></Modal>}
-    {modal?.type==="notfall"&&<Modal title="🚨 SOS-Notfall-Plan" onClose={()=>setModal(null)} wide><NotfallModal exercises={exercises} onClose={()=>setModal(null)}/></Modal>}
-    {modal?.type==="setup"&&<Modal title="Training planen" onClose={()=>setModal(null)} wide><NewTrainingWizard sessions={sessions} players={players} exercises={exercises} initialSetup={modal.setup} initialSessionId={modal.continueSessionId} startStep={modal.continueSessionId?2:1} onSaveSession={s=>{onSaveSession(s);setModal(null);toast("Training gespeichert");}} onSavePlayer={onSavePlayer} onClose={()=>setModal(null)}/></Modal>}
-    {modal?.type==="sessionDetail"&&modal.data&&<Modal title={fmtDate(modal.data.date)} onClose={()=>setModal(null)} wide><SessionDetailView s={modal.data} players={players} coaches={coaches} exercises={exercises} onDelete={()=>{onDeleteSession(modal.data.id);setModal(null);}} onClose={()=>setModal(null)} onSaveSession={onSaveSession} onPrint={()=>printSession(modal.data,exercises,toast)} onReplan={()=>setModal({type:"setup",continueSessionId:modal.data.id})}/></Modal>}
-  </div>);
-}
-
 // ── SERIENTERMINE (wiederkehrende Wochenslots) ───────────────────
 function RecurringSlotsTab({slots,sessions,onSaveSlot,onDeleteSlot,onGenerateSessions,toast}) {
   const [modal,setModal]=useState(null);
@@ -3826,7 +3807,7 @@ function TournamentDetail({tournament:t,onUpdate,onBack,coaches=[],toast,players
       ${zpHtml}
       <div class="sec-title pagebreak">📊 Übersicht (gleichzeitige Spiele)</div>
       ${ueHtml}
-      <div class="footer">Erstellt mit G-Jugend Coach App · ${new Date().toLocaleDateString("de-DE")}</div>
+      <div class="footer">Erstellt mit Teammanager · ${new Date().toLocaleDateString("de-DE")}</div>
       ${PDF_SCRIPT}
     </body></html>`;
     openPdf(html,`Turnierplan_${(t.name||"Turnier").replace(/[^a-z0-9]+/gi,"_")}_${t.date||todayISO()}.html`,toast);
@@ -4109,7 +4090,7 @@ function TurnierPage({tournaments,onSaveTournament,onDeleteTournament,coaches=[]
     }).join("");
     const html=`<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>Turnierpläne</title><style>${css}</style></head><body>
       ${body}
-      <div class="footer">Erstellt mit G-Jugend Coach App · ${new Date().toLocaleDateString("de-DE")}</div>
+      <div class="footer">Erstellt mit Teammanager · ${new Date().toLocaleDateString("de-DE")}</div>
       ${PDF_SCRIPT}
     </body></html>`;
     openPdf(html,`Turnierplaene_${chosen.length}-Turniere_${todayISO()}.html`,toast);
@@ -4232,72 +4213,6 @@ function KassePage({kassenbuch,onSave,onDelete,toast,readOnly=false,onlineUsers,
 }
 
 // ── SETTINGS PAGE ─────────────────────────────────────────────────
-function DebugExportPanel({toast}) {
-  const [log,setLog]=useState("");
-  const refresh=()=>setLog(window._getExportLog()||"(noch kein Export versucht)");
-  const copyLog=()=>{
-    const txt=window._getExportLog()||"(leer)";
-    if(navigator.clipboard) navigator.clipboard.writeText(txt).then(()=>toast("Log kopiert ✓"));
-    else { const ta=document.createElement('textarea');ta.value=txt;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);toast("Log kopiert ✓"); }
-  };
-
-  const runTest=(label,content,filename)=>{
-    dbgLog(`=== ${label} ===`);
-    dbgLog(`Dateigröße: ${content.length} Zeichen`);
-    dbgLog(`showSaveFilePicker: ${!!window.showSaveFilePicker}`);
-    // Test 1: Blob
-    try {
-      const blob = new Blob([content],{type:'application/json'});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href=url; a.download=filename; a.style.display='none';
-      document.body.appendChild(a); a.click();
-      setTimeout(()=>{URL.revokeObjectURL(url);document.body.removeChild(a);},1000);
-      dbgLog('Methode 1 (Blob+click): ausgelöst – prüfe Downloads-Ordner');
-    } catch(e){ dbgLog(`Methode 1 Fehler: ${e.message}`); }
-    // Test 2: data: URI
-    try {
-      const uri='data:application/json;charset=utf-8,'+encodeURIComponent(content);
-      const a2=document.createElement('a');
-      a2.href=uri; a2.download=filename+'_v2'; a2.style.display='none';
-      document.body.appendChild(a2); a2.click();
-      setTimeout(()=>document.body.removeChild(a2),500);
-      dbgLog('Methode 2 (data:URI+click): ausgelöst');
-    } catch(e){ dbgLog(`Methode 2 Fehler: ${e.message}`); }
-    // Test 3: window.open
-    try {
-      const uri3='data:application/json;charset=utf-8,'+encodeURIComponent(content);
-      const w=window.open(uri3,'_blank');
-      dbgLog(`Methode 3 (window.open): ${w?'Fenster geöffnet':'geblockt (null)'}`);
-    } catch(e){ dbgLog(`Methode 3 Fehler: ${e.message}`); }
-    refresh();
-  };
-
-  return(<div>
-    <div style={{fontSize:13,color:C.muted,marginBottom:12}}>Teste alle Download-Methoden direkt. Nach jedem Test: prüfe Downloads-Ordner auf neue Dateien.</div>
-    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>
-      <Btn sm onClick={()=>runTest("KLEIN (20 Bytes)",'{"test":1}','debug_klein.json')}>🧪 Klein (20 B)</Btn>
-      <Btn sm onClick={()=>runTest("GROSS (50 KB)",JSON.stringify({data:'x'.repeat(50000)}),'debug_gross.json')}>🧪 Groß (50 KB)</Btn>
-      <Btn sm variant="secondary" onClick={refresh}>🔄 Aktualisieren</Btn>
-      <Btn sm variant="secondary" onClick={copyLog}>📋 Log kopieren</Btn>
-    </div>
-    <div style={{fontSize:12,color:"#854d0e",background:"#fef9c3",borderRadius:8,padding:"8px 12px",marginBottom:10,border:"1px solid #fde047"}}>
-      Nach jedem Test: Öffne Dateien-App → Downloads → schau ob debug_klein.json oder debug_gross.json da ist. Das zeigt welche Methode klappt.
-    </div>
-    {log&&<pre style={{background:"#0f172a",color:"#94a3b8",borderRadius:8,padding:"10px 12px",fontSize:11,lineHeight:1.6,overflowX:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all",maxHeight:300,overflowY:"auto",fontFamily:"monospace"}}>{log}</pre>}
-  </div>);
-}
-
-function AddCatForm({onAdd}) {
-  const EMOJIS=["🌀","💡","🎪","🏃","🤸","🎭","🧩","⚡","🎈","🦁","🦊","🐬","🔴","🟠","🟡","🟢","🔵","🟣"];
-  const [label,setLabel]=useState("");const [emoji,setEmoji]=useState("🌀");
-  const add=()=>{if(!label.trim())return;const idx=Math.floor(Math.random()*6);const pal=CUSTOM_CAT_PALETTE[idx];onAdd({label:label.trim(),emoji,color:pal.color,bg:pal.bg,builtin:false});setLabel("");};
-  return(<div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-    <select value={emoji} onChange={e=>setEmoji(e.target.value)} style={{padding:"8px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:16,background:"white",cursor:"pointer",outline:"none"}}>{EMOJIS.map(e=><option key={e} value={e}>{e}</option>)}</select>
-    <input value={label} onChange={e=>setLabel(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} placeholder="Kategoriename..." style={{flex:1,minWidth:120,padding:"8px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:14,outline:"none",fontFamily:"inherit"}}/>
-    <Btn sm onClick={add}><Plus size={13}/> Hinzufügen</Btn>
-  </div>);
-}
 // ── ACTIVITY LOG COMPONENT ────────────────────────────────────────
 function ActivityLog() {
   const [entries,setEntries]=useState([]);
@@ -4410,9 +4325,94 @@ function UserNameEditor({u,isSelf,setUserName}) {
   </div>);
 }
 
+// ── ROLLENWAHL (Registrierung / Beitritt / Einladung) ─────────────
+function RolePicker({value,onChange}) {
+  const opts=[["eltern","👪","Elternteil"],["spieler","⚽","Spieler"],["trainer","🧑‍🏫","Trainer"]];
+  return(<div style={{display:"flex",gap:6}}>
+    {opts.map(([k,e,l])=><button key={k} type="button" onClick={()=>onChange(k)} style={{flex:1,minWidth:0,padding:"8px 4px",borderRadius:10,border:`2px solid ${value===k?C.primary:C.border}`,background:value===k?C.accentL:C.card,color:value===k?C.primary:C.muted,fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{e} {l}</button>)}
+  </div>);
+}
+
+// ── EINLADUNG: Link + Code teilen (Admin & Trainer) ───────────────
+function InviteCard({code,toast}) {
+  const [role,setRole]=useState("eltern");
+  const link=buildInviteLink(code,role);
+  const copy=(txt,label)=>{ if(navigator.clipboard) navigator.clipboard.writeText(txt).then(()=>toast(label+" kopiert ✓")); else toast("Kopieren nicht möglich","warn"); };
+  const share=async()=>{
+    if(navigator.share){ try{ await navigator.share({title:"Einladung ins Team",text:"Hier ist dein Einladungslink:",url:link}); }catch(e){} }
+    else copy(link,"Link");
+  };
+  const btn={padding:"9px 14px",borderRadius:8,border:"none",background:C.primary,color:"white",fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"};
+  return(<div style={{marginBottom:16,padding:"14px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`}}>
+    <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:10}}>🔗 Einladung</div>
+    <div style={{fontSize:12,fontWeight:700,color:C.muted,marginBottom:6}}>Einladen als</div>
+    <RolePicker value={role} onChange={setRole}/>
+    <div style={{marginTop:10,padding:"9px 12px",borderRadius:8,background:C.bg,border:`1.5px solid ${C.border}`,fontSize:12,color:C.text,wordBreak:"break-all"}}>{link}</div>
+    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:10}}>
+      <button onClick={()=>copy(link,"Link")} style={btn}>🔗 Link kopieren</button>
+      <button onClick={share} style={{...btn,background:"#0ea5e9"}}>📤 Teilen</button>
+    </div>
+    <div style={{fontSize:12,color:C.muted,marginTop:12}}>Oder Code weitergeben: <b style={{letterSpacing:2,fontSize:14,color:C.text}}>{code}</b> <button onClick={()=>copy(code,"Code")} style={{marginLeft:6,padding:"3px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:C.card,color:C.text,fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>Kopieren</button></div>
+    <div style={{fontSize:11,color:C.muted,marginTop:8}}>{role==="trainer"?"Trainer müssen nach der Anmeldung vom Admin bestätigt werden.":"Eltern und Spieler treten sofort bei. Danach werden sie mit dem Kind bzw. Spielerprofil verknüpft."}</div>
+  </div>);
+}
+
+// ── TEAMS: wechseln, weiteres Team anlegen oder beitreten (alle Rollen) ──
+function TeamsCard({user,groupId,memberships,onSwitchGroup,toast}) {
+  const allGroups=useAllGroups(user);
+  const [modal,setModal]=useState(null); // "create" | "join"
+  const [name,setName]=useState("");
+  const [code,setCode]=useState("");
+  const [role,setRole]=useState(()=>{try{return localStorage.getItem("pendingJoinRole")||"eltern";}catch(e){return "eltern";}});
+  const [busy,setBusy]=useState(false);
+  const nameOf=gid=>allGroups.find(g=>g.id===gid)?.name||gid;
+  const goto=gid=>{ try{localStorage.setItem("currentGroupId",gid);}catch(e){} setTimeout(()=>window.location.reload(),400); };
+  const doCreate=async()=>{
+    if(!name.trim()) return; setBusy(true);
+    const r=await createGroup(user,name.trim()); setBusy(false);
+    if(r.ok){ toast(`Team „${name.trim()}" angelegt ✓`); goto(r.groupId); }
+    else toast("Fehler beim Anlegen: "+r.error,"err");
+  };
+  const doJoin=async()=>{
+    if(!code.trim()) return; setBusy(true);
+    const r=await joinGroupByCode(user,code.trim(),role); setBusy(false);
+    if(!r.ok){ toast(r.error==="invalid-code"?"Code ungültig":"Fehler: "+r.error,"err"); return; }
+    if(r.pending){ toast("Beitrittswunsch gesendet – der Admin muss bestätigen"); setModal(null); return; }
+    toast(r.already?"Du bist schon in diesem Team":"Team beigetreten ✓"); goto(r.groupId);
+  };
+  const inp={width:"100%",padding:"10px 14px",border:`1.5px solid ${C.border}`,borderRadius:10,fontSize:14,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit",boxSizing:"border-box"};
+  return(<div style={{marginBottom:16,padding:"14px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`}}>
+    <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:10}}>🏟 Teams</div>
+    {memberships&&memberships.length>1
+      ?<select value={groupId||""} onChange={e=>onSwitchGroup(e.target.value)} style={{...inp,marginBottom:10}}>
+        {memberships.map(m=><option key={m.groupId} value={m.groupId}>{nameOf(m.groupId)}</option>)}
+      </select>
+      :<div style={{fontSize:14,color:C.text,marginBottom:10}}>Aktives Team: <b>{nameOf(groupId)}</b></div>}
+    <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+      <Btn sm variant="secondary" onClick={()=>setModal("create")}>➕ Weiteres Team anlegen</Btn>
+      <Btn sm variant="secondary" onClick={()=>setModal("join")}>🔗 Team beitreten</Btn>
+    </div>
+    {modal==="create"&&<Modal title="Neues Team anlegen" onClose={()=>setModal(null)}>
+      <div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:8}}>Name des Teams / Vereins</div>
+      <input value={name} onChange={e=>setName(e.target.value)} placeholder="z. B. SC Sternschanze G-Jugend 2019" style={inp}/>
+      <div style={{fontSize:11,color:C.muted,marginTop:8}}>Du wirst Admin dieses Teams und bekommst einen Einladungscode und -link.</div>
+      <div style={{display:"flex",justifyContent:"flex-end",marginTop:14}}><Btn onClick={doCreate} disabled={busy||!name.trim()}>{busy?"…":"Team anlegen"}</Btn></div>
+    </Modal>}
+    {modal==="join"&&<Modal title="Team beitreten" onClose={()=>setModal(null)}>
+      <div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:8}}>Einladungscode</div>
+      <input value={code} onChange={e=>setCode(e.target.value.toUpperCase())} placeholder="z. B. AB12CD" maxLength={8} style={{...inp,fontSize:16,letterSpacing:2,textAlign:"center"}}/>
+      <div style={{fontWeight:800,fontSize:14,color:C.text,margin:"14px 0 8px"}}>Ich bin …</div>
+      <RolePicker value={role} onChange={setRole}/>
+      <div style={{fontSize:11,color:C.muted,marginTop:8}}>{role==="trainer"?"Trainer müssen vom Admin bestätigt werden.":"Beitritt sofort. Danach verknüpft dich der Trainer mit dem Kind bzw. Spielerprofil."}</div>
+      <div style={{display:"flex",justifyContent:"flex-end",marginTop:14}}><Btn onClick={doJoin} disabled={busy||!code.trim()}>{busy?"…":"Beitreten"}</Btn></div>
+    </Modal>}
+  </div>);
+}
+
 // ── TEAM-VERWALTUNG (pro Gruppe) ───────────────────────────────────
-function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast, firebaseUser, players=[]}) {
-  const canManage = role==="admin"; // effektive Rolle berücksichtigt globalen Admin schon
+function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast, firebaseUser, players=[], onCreatePlayer}) {
+  const canManage = role==="admin"; // Rollen ändern, Beitrittswünsche, Mitglieder entfernen (effektive Rolle berücksichtigt globalen Admin schon)
+  const isCoach = role==="admin" || role==="trainer"; // Einladung teilen, Konten mit Spielerprofilen verknüpfen
   const [members,setMembers]=useState([]);
   const [inviteCode,setInviteCode]=useState(null);
   const [copied,setCopied]=useState(false);
@@ -4426,12 +4426,12 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
     return unsub;
   },[groupId]);
   useEffect(()=>{
-    if(!fbDb||!groupId||!canManage){ setInviteCode(null); return; }
+    if(!fbDb||!groupId||!isCoach){ setInviteCode(null); return; }
     const unsub=onSnapshot(doc(fbDb,"groups",groupId,"settings","invite"),snap=>{
       setInviteCode(snap.exists()?snap.data().code:null);
     },()=>{});
     return unsub;
-  },[groupId,canManage]);
+  },[groupId,isCoach]);
   const joinRequests=useJoinRequests(groupId, canManage);
   const linkMember=linkFor?members.find(x=>x.uid===linkFor):null;
   const toggleChild=(m,pid)=>{
@@ -4440,21 +4440,39 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
       .catch(()=>toast("Verknüpfung konnte nicht gespeichert werden","warn"));
   };
   const linkModal=linkMember&&(()=>{
+    const isPlayer=linkMember.role==="spieler";
     const em=(linkMember.email||"").trim().toLowerCase();
-    const suggested=p=>em&&(p.contacts||[]).some(c=>(c.email||"").trim().toLowerCase()===em);
-    const list=[...players].sort((a,b)=>(b.active!==false)-(a.active!==false)||(a.name||"").localeCompare(b.name||""));
-    return(<Modal title={`Kinder von ${linkMember.name||linkMember.email}`} onClose={()=>setLinkFor(null)}>
-      <div style={{fontSize:13,color:C.muted,marginBottom:12}}>Verknüpfte Kinder kann dieses Mitglied in der Elternansicht an- und abmelden.</div>
-      {list.length===0&&<div style={{fontSize:13,color:C.muted}}>Noch keine Spieler angelegt.</div>}
+    const nm=(linkMember.name||"").trim().toLowerCase();
+    const suggested=p=>(em&&(p.contacts||[]).some(c=>(c.email||"").trim().toLowerCase()===em))||(nm&&(p.name||"").trim().toLowerCase()===nm);
+    const linkedBy=p=>members.filter(x=>x.uid!==linkMember.uid&&(x.childIds||[]).includes(p.id)).map(x=>x.name||x.email);
+    const list=[...players].sort((a,b)=>(suggested(b)?1:0)-(suggested(a)?1:0)||(b.active!==false)-(a.active!==false)||linkedBy(a).length-linkedBy(b).length||(a.name||"").localeCompare(b.name||""));
+    const setIds=ids=>setDoc(doc(fbDb,"groups",groupId,"members",linkMember.uid),{childIds:ids},{merge:true}).catch(()=>toast("Verknüpfung konnte nicht gespeichert werden","warn"));
+    const ids=linkMember.childIds||[];
+    const pick=pid=>{ if(isPlayer) setIds(ids.includes(pid)?[]:[pid]); else setIds(ids.includes(pid)?ids.filter(x=>x!==pid):[...ids,pid]); };
+    const createProfile=()=>{
+      if(!onCreatePlayer) return;
+      const nameIn=isPlayer?(linkMember.name||linkMember.email||""):(window.prompt("Name des Kindes:")||"");
+      if(!nameIn.trim()) return;
+      const id=onCreatePlayer(nameIn.trim());
+      if(id) setIds(isPlayer?[id]:[...ids,id]);
+    };
+    const who=linkMember.name||linkMember.email;
+    return(<Modal title={isPlayer?`Spielerprofil von ${who}`:`Kinder von ${who}`} onClose={()=>setLinkFor(null)}>
+      <div style={{fontSize:13,color:C.muted,marginBottom:12}}>{isPlayer?"Mit dem verknüpften Spielerprofil kann dieses Konto selbst zu- und absagen. Ein vorhandenes Profil (vom Trainer angelegt) auswählen oder ein neues anlegen.":"Verknüpfte Kinder kann dieses Mitglied in der Elternansicht an- und abmelden. Mehrere Kinder (z. B. Zwillinge) sind möglich."}</div>
+      {list.length===0&&<div style={{fontSize:13,color:C.muted}}>Noch keine Spielerprofile angelegt.</div>}
       {list.map(p=>{
-        const on=(linkMember.childIds||[]).includes(p.id);
+        const on=ids.includes(p.id), other=linkedBy(p);
         return(<label key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 4px",borderBottom:`1px solid ${C.border}`,cursor:"pointer"}}>
-          <input type="checkbox" checked={on} onChange={()=>toggleChild(linkMember,p.id)} style={{width:18,height:18}}/>
-          <span style={{flex:1,fontSize:14,fontWeight:700,color:C.text}}>{p.name}{p.active===false&&<span style={{fontSize:11,color:C.muted,fontWeight:400}}> (inaktiv)</span>}</span>
-          {suggested(p)&&<span style={{fontSize:11,color:"#16a34a",fontWeight:700}}>✉️ passt zur E-Mail</span>}
+          <input type={isPlayer?"radio":"checkbox"} checked={on} onChange={()=>pick(p.id)} style={{width:18,height:18}}/>
+          <span style={{flex:1,fontSize:14,fontWeight:700,color:C.text}}>{p.name}{p.active===false&&<span style={{fontSize:11,color:C.muted,fontWeight:400}}> (inaktiv)</span>}
+            {other.length>0&&<span style={{display:"block",fontSize:11,color:C.muted,fontWeight:400}}>schon verknüpft mit {other.join(", ")}</span>}</span>
+          {suggested(p)&&<span style={{fontSize:11,color:"#16a34a",fontWeight:700}}>✨ Vorschlag</span>}
         </label>);
       })}
-      <div style={{display:"flex",justifyContent:"flex-end",marginTop:16}}><Btn onClick={()=>setLinkFor(null)}>Fertig</Btn></div>
+      <div style={{display:"flex",justifyContent:"space-between",gap:8,flexWrap:"wrap",marginTop:16}}>
+        {onCreatePlayer?<Btn variant="secondary" sm onClick={createProfile}>{isPlayer?"➕ Neues Spielerprofil anlegen":"➕ Neues Kind anlegen"}</Btn>:<span/>}
+        <Btn onClick={()=>setLinkFor(null)}>Fertig</Btn>
+      </div>
     </Modal>);
   })();
 
@@ -4466,25 +4484,12 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
   return(<div style={{marginBottom:28}}>
     <h2 style={{fontSize:16,fontWeight:800,color:C.text,marginBottom:14,paddingBottom:8,borderBottom:`2px solid ${C.accentL}`}}>👥 Team-Verwaltung</h2>
 
-    {memberships&&memberships.length>1&&<div style={{marginBottom:16}}>
-      <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>Aktives Team wechseln</div>
-      <select value={groupId||""} onChange={e=>onSwitchGroup(e.target.value)}
-        style={{width:"100%",padding:"9px 12px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit"}}>
-        {memberships.map(m=><option key={m.groupId} value={m.groupId}>{m.groupId}</option>)}
-      </select>
-    </div>}
+    <TeamsCard user={firebaseUser} groupId={groupId} memberships={memberships} onSwitchGroup={onSwitchGroup} toast={toast}/>
 
-    {!canManage&&<div style={{fontSize:13,color:C.muted}}>Nur der Team-Admin kann Mitglieder, Einladungscode und Beitrittswünsche verwalten.</div>}
+    {!isCoach&&<div style={{fontSize:13,color:C.muted}}>Nur Trainer und Admins können Mitglieder verwalten und Einladungen verschicken.</div>}
 
-    {canManage&&<>
-      {inviteCode&&<div style={{marginBottom:16,padding:"14px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`}}>
-        <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>🔑 Einladungscode</div>
-        <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <div style={{flex:1,padding:"9px 12px",borderRadius:8,background:"#f8fafc",border:`1.5px solid ${C.border}`,fontSize:18,fontWeight:800,letterSpacing:3,textAlign:"center",color:C.primary}}>{inviteCode}</div>
-          <button onClick={copyCode} style={{padding:"9px 14px",borderRadius:8,border:"none",background:copied?"#22c55e":C.primary,color:"white",fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>{copied?"Kopiert ✓":"Kopieren"}</button>
-        </div>
-        <div style={{fontSize:11,color:C.muted,marginTop:8}}>Wer diesen Code eingibt, tritt sofort als „Eltern" bei.</div>
-      </div>}
+    {isCoach&&<>
+      {inviteCode&&<InviteCard code={inviteCode} toast={toast}/>}
 
       {joinRequests.length>0&&<div style={{marginBottom:16}}>
         <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:8}}>⏳ Offene Beitrittswünsche ({joinRequests.length})</div>
@@ -4493,9 +4498,9 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
             {r.photo?<img src={r.photo} width={32} height={32} style={{borderRadius:"50%",flexShrink:0}}/>:<div style={{width:32,height:32,borderRadius:"50%",background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,color:C.primary,flexShrink:0}}>{(r.name||"?")[0].toUpperCase()}</div>}
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontWeight:700,fontSize:13,color:C.text}}>{r.name||r.email}</div>
-              <div style={{fontSize:11,color:C.muted}}>{r.email}</div>
+              <div style={{fontSize:11,color:C.muted}}>{r.email}{r.requestedRole&&r.requestedRole!=="eltern"?` · möchte ${USER_ROLES[r.requestedRole]?.label||r.requestedRole} sein`:""}</div>
             </div>
-            <button onClick={()=>approveJoinRequest(groupId,r.uid,"eltern")} style={{padding:"6px 10px",borderRadius:8,border:"none",background:"#22c55e",color:"white",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✓ Annehmen</button>
+            <button onClick={()=>approveJoinRequest(groupId,r.uid,r.requestedRole||"eltern")} style={{padding:"6px 10px",borderRadius:8,border:"none",background:"#22c55e",color:"white",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✓ {r.requestedRole==="trainer"?"Als Trainer annehmen":r.requestedRole==="spieler"?"Als Spieler annehmen":"Annehmen"}</button>
             <button onClick={()=>rejectJoinRequest(groupId,r.uid)} style={{padding:"6px 10px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",color:"#ef4444",fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✕</button>
           </div>)}
         </div>
@@ -4511,16 +4516,19 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
               {m.photo?<img src={m.photo} width={32} height={32} style={{borderRadius:"50%",flexShrink:0}}/>:<div style={{width:32,height:32,borderRadius:"50%",background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,color:C.primary,flexShrink:0}}>{(m.name||"?")[0].toUpperCase()}</div>}
               <div style={{flex:1,minWidth:0}}>
                 <div style={{fontWeight:700,fontSize:13,color:C.text}}>{m.name||m.email}{isSelf&&<span style={{fontSize:11,color:C.muted}}> (du)</span>}</div>
+                {isFamily(m.role||"eltern")&&!(m.childIds||[]).length&&<div style={{fontSize:11,color:"#b45309",marginTop:2}}>⚠ noch nicht mit {m.role==="spieler"?"einem Spielerprofil":"einem Kind"} verknüpft</div>}
               </div>
-              <select value={m.role||"eltern"} disabled={isSelf}
+              {!canManage&&<span style={{padding:"5px 10px",borderRadius:8,border:`1.5px solid ${r.color}`,background:r.bg,color:r.color,fontWeight:700,fontSize:12}}>{r.emoji} {r.label}</span>}
+              {canManage&&<select value={m.role||"eltern"} disabled={isSelf}
                 onChange={e=>setDoc(doc(fbDb,"groups",groupId,"members",m.uid),{role:e.target.value},{merge:true})}
                 style={{padding:"5px 10px",borderRadius:8,border:`1.5px solid ${r.color}`,background:r.bg,color:r.color,fontWeight:700,fontSize:12,cursor:isSelf?"default":"pointer",fontFamily:"inherit",outline:"none"}}>
                 <option value="admin">👑 Admin</option>
                 <option value="trainer">🧑‍🏫 Trainer</option>
                 <option value="eltern">👪 Eltern</option>
-              </select>
-              <button title="Kinder verknüpfen" onClick={()=>setLinkFor(m.uid)} style={{padding:"5px 8px",borderRadius:8,border:`1.5px solid ${C.border}`,background:(m.childIds||[]).length?C.accentL:C.card,cursor:"pointer",color:C.text,fontSize:12,fontWeight:700,flexShrink:0,fontFamily:"inherit"}}>👶 {(m.childIds||[]).length||"+"}</button>
-              {!isSelf&&<button title="Aus Team entfernen" onClick={()=>{if(window.confirm(`${m.name||m.email} aus dem Team entfernen?`))deleteDoc(doc(fbDb,"groups",groupId,"members",m.uid));}} style={{padding:"5px 8px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",cursor:"pointer",color:"#ef4444",fontSize:12,flexShrink:0}}>🗑</button>}
+                <option value="spieler">⚽ Spieler</option>
+              </select>}
+              {isFamily(m.role||"eltern")&&<button title={m.role==="spieler"?"Spielerprofil verknüpfen":"Kinder verknüpfen"} onClick={()=>setLinkFor(m.uid)} style={{padding:"5px 8px",borderRadius:8,border:`1.5px solid ${C.border}`,background:(m.childIds||[]).length?C.accentL:C.card,cursor:"pointer",color:C.text,fontSize:12,fontWeight:700,flexShrink:0,fontFamily:"inherit"}}>{m.role==="spieler"?"⚽":"👶"} {(m.childIds||[]).length||"+"}</button>}
+              {!isSelf&&canManage&&<button title="Aus Team entfernen" onClick={()=>{if(window.confirm(`${m.name||m.email} aus dem Team entfernen?`))deleteDoc(doc(fbDb,"groups",groupId,"members",m.uid));}} style={{padding:"5px 8px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",cursor:"pointer",color:"#ef4444",fontSize:12,flexShrink:0}}>🗑</button>}
             </div>);
           })}
         </div>
@@ -4530,7 +4538,7 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
   </div>);
 }
 
-function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch,onImport,toast,apiKey,onSaveApiKey,customCats,onSaveCustomCats,firebaseUser,onLogout,onFullBackup,role,isGlobalAdmin,allUsers,setUserRole,setUserName,deleteUser,prefs={},onPrefChange,onlineUsers,currentGroupId,memberships,onSwitchGroup,onGoHome,onGoBack}) {
+function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch,onImport,toast,apiKey,onSaveApiKey,customCats,onSaveCustomCats,firebaseUser,onLogout,onFullBackup,role,isGlobalAdmin,allUsers,setUserRole,setUserName,deleteUser,prefs={},onPrefChange,onFontScale,onlineUsers,currentGroupId,memberships,onSwitchGroup,onCreatePlayer,onGoHome,onGoBack}) {
   const ref=useRef();const [mode,setMode]=useState("merge");const [ki,setKi]=useState(apiKey||"");const [kv,setKv]=useState(false);
   const doImport=async e=>{ const f=e.target.files?.[0];if(!f)return;try{if(f.name.endsWith(".csv")){const p=parseCsvPlayers(await readText(f));onImport({players:p},mode==="replace"?"replace_players":"merge_players");toast(`${p.length} Spieler importiert`);}else{const d=JSON.parse(await readText(f));
     const t=d.type||"unknown";
@@ -4545,10 +4553,10 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
   const EC=({icon,title,desc,sub,fn})=><div style={{background:C.card,borderRadius:10,border:`1.5px solid ${C.border}`,padding:"14px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap"}}><div><div style={{fontWeight:700,fontSize:14,color:C.text}}>{icon} {title}</div><div style={{fontSize:12,color:C.muted,marginTop:2}}>{desc}</div>{sub&&<div style={{fontSize:11,color:"#94a3b8",marginTop:1}}>{sub}</div>}</div><Btn sm onClick={fn}><Download size={13}/> Export</Btn></div>;
   const Sec=({title,ch})=><div style={{marginBottom:28}}><h2 style={{fontSize:16,fontWeight:800,color:C.text,marginBottom:14,paddingBottom:8,borderBottom:`2px solid ${C.accentL}`}}>{title}</h2>{ch}</div>;
   return(<div>
-    <PageHeader title="Einstellungen" sub={`G-Jugend Coach · v${APP_VERSION}`} onlineUsers={onlineUsers} currentUser={firebaseUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
-    <GroupManagementPanel groupId={currentGroupId} role={role} memberships={memberships} onSwitchGroup={onSwitchGroup} toast={toast} firebaseUser={firebaseUser} players={players}/>
+    <PageHeader title="Einstellungen" sub={`Teammanager · v${APP_VERSION}`} onlineUsers={onlineUsers} currentUser={firebaseUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
+    <GroupManagementPanel groupId={currentGroupId} role={role} memberships={memberships} onSwitchGroup={onSwitchGroup} toast={toast} firebaseUser={firebaseUser} players={players} onCreatePlayer={onCreatePlayer}/>
     {/* Simplified settings for trainer/eltern */}
-    {role==="trainer"&&<SimpleSettings role={role} apiKey={apiKey} onSaveApiKey={onSaveApiKey} prefs={prefs} onPrefChange={onPrefChange} firebaseUser={firebaseUser} onLogout={onLogout}/>}
+    {role==="trainer"&&<SimpleSettings role={role} apiKey={apiKey} onSaveApiKey={onSaveApiKey} prefs={prefs} onPrefChange={onPrefChange} onFontScale={onFontScale} firebaseUser={firebaseUser} onLogout={onLogout}/>}
     {/* Full settings for TRUE global admin only (technischer Betreiber) */}
     {isGlobalAdmin&&role==="admin"&&(()=>{
       const [stab,setStab]=useState("general");
@@ -4591,6 +4599,7 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
         <div style={{width:20,height:20,borderRadius:"50%",background:"white",position:"absolute",top:3,left:prefs.darkMode?25:3,transition:"left .2s",boxShadow:"0 1px 3px rgba(0,0,0,.3)"}}/>
       </button>
     </div>
+    <div style={{marginBottom:16,padding:"12px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`}}><FontScaleControl prefs={prefs} onFontScale={onFontScale}/></div>
     {/* Firebase user info */}
     {firebaseUser&&<div style={{marginBottom:16,padding:"12px 14px",background:"#f0fdf4",borderRadius:12,border:"1.5px solid #bbf7d0",display:"flex",alignItems:"center",gap:12}}>
       {firebaseUser.photoURL&&<img src={firebaseUser.photoURL} width={36} height={36} style={{borderRadius:"50%"}} alt=""/>}
@@ -4608,13 +4617,13 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
     </div>}/>
     <Sec title="📤 Exportieren" ch={<div style={{display:"flex",flexDirection:"column",gap:10}}>
       <EC icon="💾" title="Vollständiges Backup" desc="Alle Daten inkl. Turniere & Kasse" sub={`${exercises.length} Übungen · ${players.length} Spieler · ${sessions.length} Trainings · ${tournaments.length} Turniere · ${kassenbuch.length} Kassenbucheinträge`} fn={onFullBackup}/>
-      <EC icon="📚" title="Nur Übungen" desc="Bibliothek teilen" sub={`${exercises.length} Übungen`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"exercises",exercises},`GJugend_Uebungen_${exercises.length}-Eintraege_${todayISO()}.json`,toast)}/>
-      <EC icon="👥" title="Team" desc="Spieler & Trainer" sub={`${players.length} Spieler · ${coaches.length} Trainer`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"team",players,coaches},`GJugend_Team_${players.length}-Spieler_${todayISO()}.json`,toast)}/>
-      <EC icon="📊" title="Spieler (CSV)" desc="Für Excel & Google Sheets" sub={`${players.length} Spieler`} fn={async()=>dlCsv(players,["name","birthYear","strength","active","jersey","notes"],`GJugend_Spieler_${todayISO()}.csv`,toast)}/>
-      <EC icon="📅" title="Training" desc="Alle Trainingseinheiten" sub={`${sessions.length} Einheiten`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"sessions",sessions},`GJugend_Training_${sessions.length}-Einheiten_${todayISO()}.json`,toast)}/>
-      <EC icon="🏆" title="Turniere" desc="Alle Turniere & Ergebnisse" sub={`${tournaments.length} Turniere`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"tournaments",tournaments},`GJugend_Turniere_${tournaments.length}-Turniere_${todayISO()}.json`,toast)}/>
-      <EC icon="💰" title="Kassenbuch" desc="Einnahmen & Ausgaben" sub={`${kassenbuch.length} Einträge`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"kassenbuch",kassenbuch},`GJugend_Kassenbuch_${kassenbuch.length}-Eintraege_${todayISO()}.json`,toast)}/>
-      <EC icon="📋" title="Kassenbuch (CSV)" desc="Für Excel & Steuer" sub={`${kassenbuch.length} Einträge`} fn={async()=>dlCsv(kassenbuch,["date","description","amount","type","category"],`GJugend_Kassenbuch_${todayISO()}.csv`,toast)}/>
+      <EC icon="📚" title="Nur Übungen" desc="Bibliothek teilen" sub={`${exercises.length} Übungen`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"exercises",exercises},`Teammanager_Uebungen_${exercises.length}-Eintraege_${todayISO()}.json`,toast)}/>
+      <EC icon="👥" title="Team" desc="Spieler & Trainer" sub={`${players.length} Spieler · ${coaches.length} Trainer`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"team",players,coaches},`Teammanager_Team_${players.length}-Spieler_${todayISO()}.json`,toast)}/>
+      <EC icon="📊" title="Spieler (CSV)" desc="Für Excel & Google Sheets" sub={`${players.length} Spieler`} fn={async()=>dlCsv(players,["name","birthYear","strength","active","jersey","notes"],`Teammanager_Spieler_${todayISO()}.csv`,toast)}/>
+      <EC icon="📅" title="Training" desc="Alle Trainingseinheiten" sub={`${sessions.length} Einheiten`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"sessions",sessions},`Teammanager_Training_${sessions.length}-Einheiten_${todayISO()}.json`,toast)}/>
+      <EC icon="🏆" title="Turniere" desc="Alle Turniere & Ergebnisse" sub={`${tournaments.length} Turniere`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"tournaments",tournaments},`Teammanager_Turniere_${tournaments.length}-Turniere_${todayISO()}.json`,toast)}/>
+      <EC icon="💰" title="Kassenbuch" desc="Einnahmen & Ausgaben" sub={`${kassenbuch.length} Einträge`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"kassenbuch",kassenbuch},`Teammanager_Kassenbuch_${kassenbuch.length}-Eintraege_${todayISO()}.json`,toast)}/>
+      <EC icon="📋" title="Kassenbuch (CSV)" desc="Für Excel & Steuer" sub={`${kassenbuch.length} Einträge`} fn={async()=>dlCsv(kassenbuch,["date","description","amount","type","category"],`Teammanager_Kassenbuch_${todayISO()}.csv`,toast)}/>
     </div>}/>
     <Sec title="📥 Importieren" ch={<div style={{background:C.card,borderRadius:10,border:`1.5px solid ${C.border}`,padding:"16px 18px"}}>
       <div style={{marginBottom:12}}><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>Modus</label><div style={{display:"flex",gap:8,flexWrap:"wrap"}}>{[["merge","Zusammenführen"],["replace","Ersetzen ⚠️"]].map(([k,l])=><button key={k} onClick={()=>setMode(k)} style={{padding:"6px 14px",borderRadius:8,border:`2px solid ${mode===k?C.primary:C.border}`,background:mode===k?C.accentL:"white",color:mode===k?C.primary:C.muted,cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>{l}</button>)}</div></div>
@@ -4622,20 +4631,7 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
       <Btn onClick={()=>ref.current.click()}><Upload size={14}/> Datei auswählen</Btn>
       <input ref={ref} type="file" accept=".json,.csv" onChange={doImport} style={{display:"none"}}/>
     </div>}/>
-    <Sec title="🏷️ Eigene Kategorien" ch={<div>
-      <div style={{fontSize:13,color:C.muted,marginBottom:12}}>Füge eigene Trainings-Kategorien hinzu. Sie erscheinen in der Bibliothek und bei der Planung.</div>
-      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:14}}>
-        {(customCats||[]).map((cc,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 12px",borderRadius:8,background:"#f8fafc",border:`1.5px solid ${C.border}`}}>
-          <span style={{fontSize:18}}>{cc.emoji}</span>
-          <span style={{fontWeight:700,fontSize:14,color:cc.color,flex:1}}>{cc.label}</span>
-          <span style={{fontSize:11,padding:"2px 8px",borderRadius:20,background:cc.bg,color:cc.color,fontWeight:700}}>Vorschau</span>
-          <button onClick={()=>onSaveCustomCats((customCats||[]).filter((_,j)=>j!==i))} style={{background:"none",border:"none",cursor:"pointer",color:"#ef4444",padding:4,fontSize:16}}>✕</button>
-        </div>)}
-      </div>
-      <AddCatForm onAdd={cc=>onSaveCustomCats([...(customCats||[]),cc])}/>
-    </div>}/>
-    <Sec title="🐛 Export Debug" ch={<DebugExportPanel toast={toast}/>}/>
-    <div style={{textAlign:"center",padding:"20px 0",color:"#cbd5e1",fontSize:12}}>G-Jugend Coach v{APP_VERSION} · Made with ⚽ for G-Jugend Hamburg</div>
+    <div style={{textAlign:"center",padding:"20px 0",color:"#cbd5e1",fontSize:12}}>Teammanager v{APP_VERSION} · Made with ⚽</div>
         </div>}
       </div>);
     })()}
@@ -4644,7 +4640,16 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
 
 // ── EINSTELLUNGEN FÜR ELTERN (bewusst minimal) ────────────────────
 const FONT_SCALES = [{v:1,l:"Normal"},{v:1.15,l:"Groß"},{v:1.3,l:"Sehr groß"}];
-function ParentSettingsPage({firebaseUser,groupId,myKids,prefs,onPrefChange,onFontScale,onLogout,toast,onlineUsers}) {
+function FontScaleControl({prefs,onFontScale}) {
+  const scale=prefs?.fontScale||1;
+  return(<div>
+    <div style={{fontWeight:600,fontSize:14,color:C.text,marginBottom:8}}>🔠 Schriftgröße</div>
+    <div style={{display:"flex",gap:8}}>
+      {FONT_SCALES.map(f=><button key={f.v} onClick={()=>onFontScale&&onFontScale(f.v)} style={{flex:1,padding:"9px 6px",borderRadius:10,border:`2px solid ${scale===f.v?C.primary:C.border}`,background:scale===f.v?C.accentL:C.card,color:scale===f.v?C.primary:C.muted,fontWeight:800,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>{f.l}</button>)}
+    </div>
+  </div>);
+}
+function ParentSettingsPage({role,firebaseUser,groupId,memberships,onSwitchGroup,myKids,prefs,onPrefChange,onFontScale,onLogout,toast,onlineUsers}) {
   const [name,setName]=useState(firebaseUser?.displayName||"");
   const [saving,setSaving]=useState(false);
   const scale=prefs.fontScale||1;
@@ -4677,8 +4682,10 @@ function ParentSettingsPage({firebaseUser,groupId,myKids,prefs,onPrefChange,onFo
           <Btn onClick={saveName} disabled={saving||!name.trim()||name.trim()===(firebaseUser?.displayName||"")}>{saving?"…":"Speichern"}</Btn>
         </div>
         <div style={{fontSize:12,color:C.muted,marginTop:10}}>E-Mail: {firebaseUser?.email}</div>
-        {myKids.length>0&&<div style={{fontSize:12,color:C.muted,marginTop:4}}>{myKids.length>1?"Verknüpfte Kinder":"Verknüpftes Kind"}: <b style={{color:C.text}}>{myKids.map(k=>k.name).join(", ")}</b></div>}
+        {myKids.length>0&&<div style={{fontSize:12,color:C.muted,marginTop:4}}>{role==="spieler"?"Mein Spielerprofil":myKids.length>1?"Verknüpfte Kinder":"Verknüpftes Kind"}: <b style={{color:C.text}}>{myKids.map(k=>k.name).join(", ")}</b></div>}
       </div>
+
+      <TeamsCard user={firebaseUser} groupId={groupId} memberships={memberships} onSwitchGroup={onSwitchGroup} toast={toast}/>
 
       <div style={card}>
         <div style={head}>🎨 Darstellung</div>
@@ -4705,7 +4712,7 @@ function ParentSettingsPage({firebaseUser,groupId,myKids,prefs,onPrefChange,onFo
 }
 
 // ── SIMPLE SETTINGS (Trainer/Eltern) ──────────────────────────────
-function SimpleSettings({role,apiKey,onSaveApiKey,prefs,onPrefChange,firebaseUser,onLogout}) {
+function SimpleSettings({role,apiKey,onSaveApiKey,prefs,onPrefChange,onFontScale,firebaseUser,onLogout}) {
   const [apiInput,setApiInput]=useState(apiKey||"");
   const [saved,setSaved]=useState(false);
 
@@ -4740,6 +4747,7 @@ function SimpleSettings({role,apiKey,onSaveApiKey,prefs,onPrefChange,firebaseUse
           <div style={{width:20,height:20,borderRadius:"50%",background:"white",position:"absolute",top:3,left:prefs.darkMode?25:3,transition:"left .2s",boxShadow:"0 1px 3px rgba(0,0,0,.3)"}}/>
         </button>
       </div>
+      <div style={{marginTop:16}}><FontScaleControl prefs={prefs} onFontScale={onFontScale}/></div>
     </div>
 
     {/* API Key - only for trainer */}
@@ -4893,9 +4901,8 @@ function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets
   ].sort((a,b)=>a.date.localeCompare(b.date)).slice(0,10);
 
   const teasers=[
-    can(role,"anmeldung")&&{icon:"✅",title:"Anmeldung",sub:role==="eltern"?(openRsvps>0?`${openRsvps} offen`:"Alles beantwortet"):"Zu-/Absagen",badge:role==="eltern"&&openRsvps>0?openRsvps:null,onClick:()=>onNavigate("anmeldung")},
     can(role,"calendar")&&{icon:"🗓",title:"Termine",sub:"Alle Termine",onClick:()=>onNavigate("calendar")},
-    can(role,"training")&&{icon:"📅",title:"Neues Training",sub:nextSession?relDateLabel(nextSession.date):"Neue Einheit",onClick:()=>onNavigate("training")},
+    {icon:"📅",title:"Neues Training",sub:nextSession?relDateLabel(nextSession.date):"Neue Einheit",onClick:()=>onOpenCalendarItem?onOpenCalendarItem({type:"newTraining"}):onNavigate("calendar")},
     {icon:"👥",title:"Team",sub:`${activePlayers.length} Spieler`,onClick:()=>onNavigate("team")},
     can(role,"teamplaner")&&{icon:"🔀",title:"Teams losen",sub:`${(teamsets||[]).length} gespeichert`,onClick:()=>onNavigate("teamplaner")},
     can(role,"turnier")&&{icon:"🏆",title:"Turniere",sub:`${(tournaments||[]).length} geplant`,onClick:()=>onNavigate("turnier")},
@@ -4999,20 +5006,16 @@ function Nav({page,setPage,counts}) {
 
   const allItems=[
     {key:"start",    icon:Home,      label:"Start"},
-    {key:"calendar", icon:Clock,     label:"Termine"},
-    {key:"termine",  icon:Clock,     label:"Termine"},
-    {key:"anmeldung",icon:CheckSquare,label:"Anmeldung",alert:counts.role==="eltern"&&counts.openRsvps>0},
+    {key:"calendar", icon:Clock,     label:"Termine",alert:isFamily(counts.role)&&counts.openRsvps>0},
     {key:"library",  icon:BookOpen,  label:"Bibliothek", count:counts.exercises},
     {key:"team",     icon:Users,     label:"Team",        count:counts.players},
-    {key:"training", icon:CalendarDays,label:"Training",  count:counts.sessions},
     {key:"teamplaner",icon:Shuffle,  label:"Teams",       count:counts.teamsets},
-    {key:"turnier",  icon:Trophy,    label:"Turnier",     count:counts.tournaments},
     {key:"kasse",    icon:Wallet,    label:"Kasse"},
     {key:"orga",     icon:ClipboardList,label:"To Dos",count:counts.openTodos},
     {key:"settings", icon:Settings,  label:"Einstellungen",alert:counts.pendingCount>0},
   ];
-  const visible=allItems.filter(i=>can(counts.role,i.key)||(i.key==="settings"&&(counts.role==="trainer"||counts.role==="eltern")));
-  const MAIN_KEYS=counts.role==="eltern"?["start","termine","anmeldung","settings"]:["start","calendar","training","teamplaner"];
+  const visible=allItems.filter(i=>can(counts.role,i.key)||(i.key==="settings"&&(counts.role==="trainer"||isFamily(counts.role))));
+  const MAIN_KEYS=isFamily(counts.role)?["start","calendar","settings"]:["start","calendar","library","teamplaner"];
   const mainItems=visible.filter(i=>MAIN_KEYS.includes(i.key));
   const moreItems=visible.filter(i=>!MAIN_KEYS.includes(i.key));
   const moreActive=moreItems.some(i=>i.key===page);
@@ -5020,15 +5023,15 @@ function Nav({page,setPage,counts}) {
 
   // Gruppierung für das Hamburger-Menü (volle Übersicht aller Bereiche)
   const MENU_GROUPS=[
-    {label:null,        keys:["start","calendar","termine","anmeldung"]},
-    {label:"Training",  keys:["library","training","teamplaner"]},
-    {label:"Mannschaft",keys:["team","turnier"]},
+    {label:null,        keys:["start","calendar"]},
+    {label:"Training",  keys:["library","teamplaner"]},
+    {label:"Mannschaft",keys:["team"]},
     {label:"Verwaltung",keys:["kasse","orga"]},
     {label:"Sonstiges", keys:["settings"]},
   ];
 
   const navBtn=(item)=>{
-    const active=page===item.key;
+    const active=page===item.key||(item.key==="calendar"&&page==="turnier");
     const Icon=item.icon;
     return(<button key={item.key} onClick={()=>{setPage(item.key);setMenuOpen(false);}} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4,padding:"10px 4px",border:"none",cursor:"pointer",background:"transparent",color:active?"#4ade80":"rgba(255,255,255,.5)",fontFamily:"inherit",position:"relative"}}>
       <Icon size={22} strokeWidth={active?2.5:1.8}/>
@@ -5042,8 +5045,8 @@ function Nav({page,setPage,counts}) {
     {/* Desktop sidebar */}
     <div className="gn">
       <div style={{padding:"24px 8px 20px",borderBottom:"1px solid rgba(255,255,255,.1)",marginBottom:12}}>
-        <div style={{fontSize:11,color:"rgba(255,255,255,.4)",letterSpacing:2,fontWeight:700}}>G-JUGEND</div>
-        <div style={{fontSize:18,fontWeight:900,color:"white",marginTop:2}}>⚽ Coach</div>
+        <div style={{fontSize:11,color:"rgba(255,255,255,.4)",letterSpacing:2,fontWeight:700}}>TEAM</div>
+        <div style={{fontSize:18,fontWeight:900,color:"white",marginTop:2}}>⚽ Manager</div>
         <div style={{fontSize:10,color:"rgba(255,255,255,.3)",marginTop:2}}>v{APP_VERSION}</div>
       </div>
       {visible.map(({key,icon:Icon,label,count})=><button key={key} onClick={()=>setPage(key)} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:10,border:"none",cursor:"pointer",marginBottom:4,width:"100%",textAlign:"left",fontFamily:"inherit",background:page===key?"rgba(34,197,94,.2)":"transparent",color:page===key?"#4ade80":"rgba(255,255,255,.6)"}}><Icon size={18} strokeWidth={page===key?2.5:1.8}/><span style={{fontSize:14,fontWeight:700,flex:1}}>{label}</span>{count!==undefined&&<span style={{fontSize:11,background:"rgba(255,255,255,.1)",borderRadius:20,padding:"1px 7px",color:"rgba(255,255,255,.5)"}}>{count}</span>}</button>)}
@@ -5064,8 +5067,8 @@ function Nav({page,setPage,counts}) {
     <div style={{position:"fixed",top:0,left:0,bottom:0,width:"78%",maxWidth:300,background:"white",zIndex:301,transform:menuOpen?"translateX(0)":"translateX(-105%)",transition:"transform .25s ease",display:"flex",flexDirection:"column",boxShadow:"4px 0 32px rgba(0,0,0,.25)",paddingTop:"env(safe-area-inset-top)"}}>
       <div style={{padding:"20px 18px 14px",display:"flex",alignItems:"center",gap:10,borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
         <div style={{flex:1,minWidth:0}}>
-          <div style={{fontSize:11,color:C.muted,letterSpacing:2,fontWeight:700}}>G-JUGEND</div>
-          <div style={{fontSize:17,fontWeight:900,color:C.text,marginTop:2}}>⚽ Coach</div>
+          <div style={{fontSize:11,color:C.muted,letterSpacing:2,fontWeight:700}}>TEAM</div>
+          <div style={{fontSize:17,fontWeight:900,color:C.text,marginTop:2}}>⚽ Manager</div>
         </div>
         <button onClick={()=>setMenuOpen(false)} style={{background:"none",border:"none",cursor:"pointer",color:C.muted,padding:4,flexShrink:0}}><X size={22}/></button>
       </div>
@@ -5076,7 +5079,7 @@ function Nav({page,setPage,counts}) {
           return(<div key={gi}>
             {g.label&&<div style={{fontSize:11,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:1,padding:"14px 10px 6px"}}>{g.label}</div>}
             {items.map(({key,icon:Icon,label,count,alert})=>{
-              const active=page===key;
+              const active=page===key||(key==="calendar"&&page==="turnier");
               return(<button key={key} onClick={()=>{setPage(key);setMenuOpen(false);}} style={{display:"flex",alignItems:"center",gap:12,width:"100%",padding:"11px 10px",borderRadius:10,border:"none",cursor:"pointer",fontFamily:"inherit",textAlign:"left",background:active?C.accentL:"transparent",color:active?C.primary:C.text,position:"relative",marginBottom:2}}>
                 <Icon size={19} strokeWidth={active?2.5:1.8}/>
                 {alert&&<span style={{position:"absolute",top:8,left:30,background:"#ef4444",width:7,height:7,borderRadius:"50%"}}/>}
@@ -5103,7 +5106,7 @@ function RsvpStatusPills({kids,ev,rsvps}) {
   </div>);
 }
 
-function ParentStartPage({currentUser,events,myKids,rsvps,openRsvps,onNavigate}) {
+function ParentStartPage({role,currentUser,events,myKids,rsvps,openRsvps,onNavigate}) {
   const firstName=(currentUser?.displayName||currentUser?.email||"").split(/[ @]/)[0];
   const hour=new Date().getHours();
   const greeting=hour<11?"Guten Morgen":hour<18?"Hallo":"Guten Abend";
@@ -5119,9 +5122,9 @@ function ParentStartPage({currentUser,events,myKids,rsvps,openRsvps,onNavigate})
     </div>
 
     {myKids.length===0
-      ?<div style={{...box,fontSize:14,color:C.muted,lineHeight:1.5}}>Dein Profil ist noch mit keinem Kind verknüpft. Bitte den Team-Admin, dich mit deinem Kind zu verknüpfen – dann kannst du hier zu- und absagen.</div>
+      ?<div style={{...box,fontSize:14,color:C.muted,lineHeight:1.5}}>{role==="spieler"?"Dein Konto ist noch nicht mit einem Spielerprofil verknüpft. Bitte deinen Trainer, dich zu verknüpfen – dann kannst du hier zu- und absagen.":"Dein Profil ist noch mit keinem Kind verknüpft. Bitte den Trainer oder Admin, dich mit deinem Kind zu verknüpfen – dann kannst du hier zu- und absagen."}</div>
       :openRsvps>0
-        ?<div onClick={()=>onNavigate("anmeldung")} style={{...box,border:"1.5px solid #fde047",background:"#fef9c3",cursor:"pointer",display:"flex",alignItems:"center",gap:10}}>
+        ?<div onClick={()=>onNavigate("calendar")} style={{...box,border:"1.5px solid #fde047",background:"#fef9c3",cursor:"pointer",display:"flex",alignItems:"center",gap:10}}>
           <span style={{fontSize:24}}>⏳</span>
           <div style={{flex:1}}><div style={{fontWeight:800,fontSize:14,color:"#854d0e"}}>{openRsvps} Antwort{openRsvps!==1?"en":""} offen</div><div style={{fontSize:12,color:"#a16207"}}>Jetzt zu- oder absagen</div></div>
           <span style={{color:"#a16207",fontWeight:800}}>→</span>
@@ -5129,32 +5132,53 @@ function ParentStartPage({currentUser,events,myKids,rsvps,openRsvps,onNavigate})
         :<div style={{...box,display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:24}}>✅</span><div style={{fontWeight:800,fontSize:14,color:C.text}}>Alles beantwortet</div></div>}
 
     <div className="tm-hscroll" style={{display:"flex",gap:10,overflowX:"auto",marginBottom:24,paddingBottom:2}}>
-      <StartTeaser icon="🗓" title="Termine" sub="Trainings & Spieltage" onClick={()=>onNavigate("termine")}/>
-      <StartTeaser icon="✅" title="Anmeldung" sub={openRsvps>0?`${openRsvps} offen`:"Zu-/Absagen"} badge={openRsvps>0?openRsvps:null} onClick={()=>onNavigate("anmeldung")}/>
+      <StartTeaser icon="🗓" title="Termine" sub={openRsvps>0?`${openRsvps} offen`:"Zu- und Absagen"} badge={openRsvps>0?openRsvps:null} onClick={()=>onNavigate("calendar")}/>
     </div>
 
     <div style={{fontWeight:800,fontSize:15,color:C.text,marginBottom:10}}>Als Nächstes</div>
     {next.length===0&&<div style={{...box,fontSize:14,color:C.muted}}>Aktuell sind keine Termine geplant.</div>}
-    {next.map(ev=><div key={ev.key} onClick={()=>onNavigate("anmeldung")} style={{...box,marginBottom:10,cursor:"pointer"}}>
+    {next.map(ev=><div key={ev.key} onClick={()=>onNavigate("calendar")} style={{...box,marginBottom:10,cursor:"pointer"}}>
       <RsvpEventHead ev={ev}/>
       {myKids.length>0&&<RsvpStatusPills kids={myKids} ev={ev} rsvps={rsvps}/>}
     </div>)}
   </div>);
 }
 
-function ParentTermine({events,myKids,rsvps,onNavigate,onlineUsers,currentUser}) {
-  const [showAll,setShowAll]=useState(false);
-  const horizon=addDaysISO(todayISO(),RSVP_HORIZON_DAYS);
-  const shown=showAll?events:events.filter(e=>e.date<=horizon);
-  const hidden=events.length-shown.length;
-  return(<div>
-    <PageHeader title="Termine" sub="Trainings & Spieltage" onlineUsers={onlineUsers} currentUser={currentUser}/>
-    {shown.length===0&&<div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted}}>Aktuell sind keine Termine geplant.</div>}
-    {shown.map(ev=><div key={ev.key} onClick={()=>onNavigate("anmeldung")} style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"12px 16px",marginBottom:10,cursor:"pointer"}}>
-      <RsvpEventHead ev={ev}/>
-      {myKids.length>0&&<RsvpStatusPills kids={myKids} ev={ev} rsvps={rsvps}/>}
-    </div>)}
-    {hidden>0&&<div style={{textAlign:"center",marginTop:6}}><Btn sm variant="secondary" onClick={()=>setShowAll(true)}>{hidden} weitere Termine anzeigen</Btn></div>}
+// ── ANMELDUNG im Termin (Trainer/Admin): Zähler + aufklappbare Spielerliste mit Statusfiltern ──
+function RsvpInline({ev,players,rsvps,onSetRsvp,toast}) {
+  const [open,setOpen]=useState(false);
+  const [filter,setFilterRaw]=useState(()=>{try{return sessionStorage.getItem("rsvpFilter")||"all";}catch(e){return "all";}});
+  const [pinned,setPinned]=useState(()=>new Set()); // eben geänderte Spieler bleiben sichtbar, damit die Liste nicht springt
+  const setFilter=f=>{setFilterRaw(f);setPinned(new Set());try{sessionStorage.setItem("rsvpFilter",f);}catch(e){}};
+  const active=players.filter(p=>p.active!==false).sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+  if(active.length===0) return null;
+  const stOf=p=>rsvps[rsvpKey(ev.key,p.id)]?.status||null;
+  const yes=active.filter(p=>stOf(p)==="yes"), maybe=active.filter(p=>stOf(p)==="maybe"), no=active.filter(p=>stOf(p)==="no"), openL=active.filter(p=>!stOf(p));
+  const save=async(e2,pid,status,note)=>{
+    setPinned(prev=>new Set(prev).add(pid));
+    try{ await onSetRsvp(e2,pid,status,note); }
+    catch(e){ console.warn("rsvp",e); toast("Speichern nicht möglich – bitte Berechtigung prüfen","warn"); }
+  };
+  const filters=[{k:"all",l:"Alle",n:active.length},{k:"yes",l:"✅ Dabei",n:yes.length},{k:"maybe",l:"🤔 Unsicher",n:maybe.length},{k:"no",l:"❌ Nicht dabei",n:no.length},{k:"open",l:"⏳ Keine Antwort",n:openL.length}];
+  const visible=active.filter(p=>{const st=stOf(p);return filter==="all"||(filter==="open"?!st:st===filter)||pinned.has(p.id);});
+  const noted=[...no,...maybe].filter(p=>rsvps[rsvpKey(ev.key,p.id)]?.note);
+  return(<div style={{marginTop:4}}>
+    <div onClick={()=>{setOpen(o=>!o);setPinned(new Set());}} style={{display:"flex",alignItems:"center",gap:14,fontSize:13,fontWeight:800,padding:"6px 8px",cursor:"pointer"}}>
+      <span style={{fontSize:11,color:C.muted,fontWeight:700}}>Anmeldung</span>
+      <span style={{color:"#16a34a"}}>✅ {yes.length}</span>
+      <span style={{color:"#b45309"}}>🤔 {maybe.length}</span>
+      <span style={{color:"#dc2626"}}>❌ {no.length}</span>
+      <span style={{color:C.muted}}>⏳ {openL.length}</span>
+      <span style={{marginLeft:"auto",color:C.muted,fontWeight:600}}>{open?"▲":"▼"}</span>
+    </div>
+    {!open&&noted.length>0&&<div style={{fontSize:12,color:C.muted,padding:"0 8px 6px"}}>{noted.map(p=>`${p.name}: ${rsvps[rsvpKey(ev.key,p.id)].note}`).join(" · ")}</div>}
+    {open&&<div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"10px 14px",marginTop:2}}>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:4}}>
+        {filters.map(f=><button key={f.k} onClick={()=>setFilter(f.k)} style={{padding:"5px 10px",borderRadius:20,border:`1.5px solid ${filter===f.k?C.primary:C.border}`,background:filter===f.k?C.accentL:C.card,color:filter===f.k?C.primary:C.muted,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{f.l} {f.n}</button>)}
+      </div>
+      {visible.length===0&&<div style={{fontSize:13,color:C.muted,padding:"10px 0"}}>Keine Spieler in dieser Auswahl.</div>}
+      {visible.map(p=><RsvpKidRow key={p.id} kid={p} ev={ev} rsvp={rsvps[rsvpKey(ev.key,p.id)]} onSave={save} compact/>)}
+    </div>}
   </div>);
 }
 
@@ -5187,12 +5211,10 @@ function RsvpKidRow({kid,ev,rsvp,onSave,compact,showName=true}) {
   </div>);
 }
 
-function RsvpPage({role,events,players,rsvps,onSetRsvp,myKids,toast,onlineUsers,currentUser,onGoHome,onGoBack}) {
-  const isParent = role==="eltern";
+function RsvpPage({role,events,players,rsvps,onSetRsvp,myKids,toast,onlineUsers,currentUser}) {
+  // Elternansicht "Termine": eigene Kinder zu-/absagen, andere nur ansehen
   const [showAll,setShowAll] = useState(false);
   const [openKey,setOpenKey] = useState(null);
-  const [statusFilter,setStatusFilter] = useState("all"); // all | yes | maybe | no | open
-  const [pinned,setPinned] = useState(()=>new Set());     // eben geänderte Spieler bleiben sichtbar, damit die Liste nicht springt
   const horizon = addDaysISO(todayISO(),RSVP_HORIZON_DAYS);
   const shown = showAll ? events : events.filter(e=>e.date<=horizon);
   const hidden = events.length - shown.length;
@@ -5200,86 +5222,43 @@ function RsvpPage({role,events,players,rsvps,onSetRsvp,myKids,toast,onlineUsers,
     try{ await onSetRsvp(ev,pid,status,note); }
     catch(e){ console.warn("rsvp",e); toast("Speichern nicht möglich – bitte Berechtigung prüfen","warn"); }
   };
-  const moreBtn = hidden>0&&<div style={{textAlign:"center",marginTop:6}}><Btn sm variant="secondary" onClick={()=>setShowAll(true)}>{hidden} weitere Termine anzeigen</Btn></div>;
-
   const active = players.filter(p=>p.active!==false).sort((a,b)=>(a.name||"").localeCompare(b.name||""));
   const stOf=(ev,p)=>rsvps[rsvpKey(ev.key,p.id)]?.status||null;
-
-  // ── Elternansicht: Kind(er) an-/abmelden, andere nur ansehen ──
-  if(isParent){
-    if(myKids.length===0) return(<div>
-      <PageHeader title="Anmeldung" sub="Zu- und Absagen" onlineUsers={onlineUsers} currentUser={currentUser}/>
-      <div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted,lineHeight:1.5}}>
-        Dein Profil ist noch mit keinem Kind verknüpft. Bitte den Team-Admin, dich unter <b>Einstellungen → Team-Verwaltung</b> (Button 👶 bei deinem Namen) mit deinem Kind zu verknüpfen.
-      </div>
-    </div>);
-    return(<div>
-      <PageHeader title="Anmeldung" sub={myKids.map(k=>k.name).join(" & ")} onlineUsers={onlineUsers} currentUser={currentUser}/>
-      <div style={{fontSize:12,color:C.muted,marginBottom:12}}>Tippe erneut auf deine Auswahl, um sie zurückzunehmen.</div>
-      {shown.length===0&&<div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted}}>Aktuell sind keine Termine geplant.</div>}
-      {shown.map(ev=>{
-        const open=myKids.filter(k=>!rsvps[rsvpKey(ev.key,k.id)]).length;
-        const yesL=active.filter(p=>stOf(ev,p)==="yes"), maybeL=active.filter(p=>stOf(ev,p)==="maybe"), noL=active.filter(p=>stOf(ev,p)==="no"), openL=active.filter(p=>!stOf(ev,p));
-        const isOpen=openKey===ev.key;
-        return(<div key={ev.key} style={{background:C.card,borderRadius:12,border:`1.5px solid ${open>0?"#fde047":C.border}`,padding:"12px 16px",marginBottom:10}}>
-          <RsvpEventHead ev={ev}/>
-          <div style={{marginTop:6}}>
-            {myKids.map(k=><RsvpKidRow key={k.id} kid={k} ev={ev} rsvp={rsvps[rsvpKey(ev.key,k.id)]} onSave={save} showName={myKids.length>1}/>)}
-          </div>
-          <div onClick={()=>setOpenKey(isOpen?null:ev.key)} style={{cursor:"pointer",display:"flex",gap:14,fontSize:13,fontWeight:800,marginTop:4,paddingTop:10,borderTop:`1px solid ${C.border}`}}>
-            <span style={{color:"#16a34a"}}>✅ {yesL.length}</span>
-            <span style={{color:"#b45309"}}>🤔 {maybeL.length}</span>
-            <span style={{color:"#dc2626"}}>❌ {noL.length}</span>
-            <span style={{color:C.muted}}>⏳ {openL.length}</span>
-            <span style={{marginLeft:"auto",color:C.muted,fontWeight:600,fontSize:12}}>Wer kommt? {isOpen?"▲":"▼"}</span>
-          </div>
-          {isOpen&&<div style={{marginTop:8,fontSize:13,color:C.text,lineHeight:1.6}}>
-            {yesL.length>0&&<div><b style={{color:"#16a34a"}}>Dabei:</b> {yesL.map(p=>p.name).join(", ")}</div>}
-            {maybeL.length>0&&<div><b style={{color:"#b45309"}}>Unsicher:</b> {maybeL.map(p=>p.name).join(", ")}</div>}
-            {noL.length>0&&<div><b style={{color:"#dc2626"}}>Nicht dabei:</b> {noL.map(p=>p.name).join(", ")}</div>}
-            {openL.length>0&&<div><b style={{color:C.muted}}>Noch offen:</b> {openL.map(p=>p.name).join(", ")}</div>}
-          </div>}
-        </div>);
-      })}
-      {moreBtn}
-    </div>);
-  }
-
-  // ── Trainer-/Admin-Ansicht: Übersicht je Termin ──
+  if(myKids.length===0) return(<div>
+    <PageHeader title="Termine" sub="Trainings & Spieltage" onlineUsers={onlineUsers} currentUser={currentUser}/>
+    <div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted,lineHeight:1.5}}>
+      {role==="spieler"?"Dein Konto ist noch nicht mit einem Spielerprofil verknüpft. Bitte deinen Trainer, dich zu verknüpfen.":"Dein Profil ist noch mit keinem Kind verknüpft. Bitte den Trainer oder Admin, dich mit deinem Kind zu verknüpfen."}
+    </div>
+  </div>);
   return(<div>
-    <PageHeader title="Anmeldung" sub={`${shown.length} Termine · ${active.length} aktive Spieler`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
+    <PageHeader title="Termine" sub={myKids.map(k=>k.name).join(" & ")} onlineUsers={onlineUsers} currentUser={currentUser}/>
+    <div style={{fontSize:12,color:C.muted,marginBottom:12}}>Tippe erneut auf deine Auswahl, um sie zurückzunehmen.</div>
     {shown.length===0&&<div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted}}>Aktuell sind keine Termine geplant.</div>}
     {shown.map(ev=>{
-      const yes=active.filter(p=>stOf(ev,p)==="yes"), maybe=active.filter(p=>stOf(ev,p)==="maybe"), no=active.filter(p=>stOf(ev,p)==="no"), openL=active.filter(p=>!stOf(ev,p));
+      const open=myKids.filter(k=>!rsvps[rsvpKey(ev.key,k.id)]).length;
+      const yesL=active.filter(p=>stOf(ev,p)==="yes"), maybeL=active.filter(p=>stOf(ev,p)==="maybe"), noL=active.filter(p=>stOf(ev,p)==="no"), openL=active.filter(p=>!stOf(ev,p));
       const isOpen=openKey===ev.key;
-      const filters=[{k:"all",l:"Alle",n:active.length},{k:"yes",l:"✅ Dabei",n:yes.length},{k:"maybe",l:"🤔 Unsicher",n:maybe.length},{k:"no",l:"❌ Nicht dabei",n:no.length},{k:"open",l:"⏳ Keine Antwort",n:openL.length}];
-      const visible=active.filter(p=>{
-        const st=stOf(ev,p);
-        return statusFilter==="all"||(statusFilter==="open"?!st:st===statusFilter)||pinned.has(p.id);
-      });
-      const saveKeep=(e2,pid,st,note)=>{ setPinned(prev=>new Set(prev).add(pid)); return save(e2,pid,st,note); };
-      return(<div key={ev.key} style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"12px 16px",marginBottom:10}}>
-        <div onClick={()=>{setOpenKey(isOpen?null:ev.key);setPinned(new Set());}} style={{cursor:"pointer"}}>
-          <RsvpEventHead ev={ev}/>
-          <div style={{display:"flex",gap:14,fontSize:13,fontWeight:800,marginTop:8}}>
-            <span style={{color:"#16a34a"}}>✅ {yes.length}</span>
-            <span style={{color:"#b45309"}}>🤔 {maybe.length}</span>
-            <span style={{color:"#dc2626"}}>❌ {no.length}</span>
-            <span style={{color:C.muted}}>⏳ {openL.length}</span>
-            <span style={{marginLeft:"auto",color:C.muted,fontWeight:600}}>{isOpen?"▲":"▼"}</span>
-          </div>
-          {!isOpen&&[...no,...maybe].some(p=>rsvps[rsvpKey(ev.key,p.id)]?.note)&&<div style={{fontSize:12,color:C.muted,marginTop:6}}>{[...no,...maybe].filter(p=>rsvps[rsvpKey(ev.key,p.id)]?.note).map(p=>`${p.name}: ${rsvps[rsvpKey(ev.key,p.id)].note}`).join(" · ")}</div>}
+      return(<div key={ev.key} style={{background:C.card,borderRadius:12,border:`1.5px solid ${open>0?"#fde047":C.border}`,padding:"12px 16px",marginBottom:10}}>
+        <RsvpEventHead ev={ev}/>
+        <div style={{marginTop:6}}>
+          {myKids.map(k=><RsvpKidRow key={k.id} kid={k} ev={ev} rsvp={rsvps[rsvpKey(ev.key,k.id)]} onSave={save} showName={myKids.length>1}/>)}
         </div>
-        {isOpen&&<div>
-          <div style={{display:"flex",gap:6,flexWrap:"wrap",margin:"12px 0 4px"}}>
-            {filters.map(f=><button key={f.k} onClick={()=>{setStatusFilter(f.k);setPinned(new Set());}} style={{padding:"5px 10px",borderRadius:20,border:`1.5px solid ${statusFilter===f.k?C.primary:C.border}`,background:statusFilter===f.k?C.accentL:C.card,color:statusFilter===f.k?C.primary:C.muted,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{f.l} {f.n}</button>)}
-          </div>
-          {visible.length===0&&<div style={{fontSize:13,color:C.muted,padding:"10px 0"}}>Keine Spieler in dieser Auswahl.</div>}
-          {visible.map(p=><RsvpKidRow key={p.id} kid={p} ev={ev} rsvp={rsvps[rsvpKey(ev.key,p.id)]} onSave={saveKeep} compact/>)}
+        <div onClick={()=>setOpenKey(isOpen?null:ev.key)} style={{cursor:"pointer",display:"flex",gap:14,fontSize:13,fontWeight:800,marginTop:4,paddingTop:10,borderTop:`1px solid ${C.border}`}}>
+          <span style={{color:"#16a34a"}}>✅ {yesL.length}</span>
+          <span style={{color:"#b45309"}}>🤔 {maybeL.length}</span>
+          <span style={{color:"#dc2626"}}>❌ {noL.length}</span>
+          <span style={{color:C.muted}}>⏳ {openL.length}</span>
+          <span style={{marginLeft:"auto",color:C.muted,fontWeight:600,fontSize:12}}>Wer kommt? {isOpen?"▲":"▼"}</span>
+        </div>
+        {isOpen&&<div style={{marginTop:8,fontSize:13,color:C.text,lineHeight:1.6}}>
+          {yesL.length>0&&<div><b style={{color:"#16a34a"}}>Dabei:</b> {yesL.map(p=>p.name).join(", ")}</div>}
+          {maybeL.length>0&&<div><b style={{color:"#b45309"}}>Unsicher:</b> {maybeL.map(p=>p.name).join(", ")}</div>}
+          {noL.length>0&&<div><b style={{color:"#dc2626"}}>Nicht dabei:</b> {noL.map(p=>p.name).join(", ")}</div>}
+          {openL.length>0&&<div><b style={{color:C.muted}}>Noch offen:</b> {openL.map(p=>p.name).join(", ")}</div>}
         </div>}
       </div>);
     })}
-    {moreBtn}
+    {hidden>0&&<div style={{textAlign:"center",marginTop:6}}><Btn sm variant="secondary" onClick={()=>setShowAll(true)}>{hidden} weitere Termine anzeigen</Btn></div>}
   </div>);
 }
 
@@ -5446,6 +5425,9 @@ function AuthScreen({onGoogle,onEmail,onRegister,onReset}) {
   const [err,setErr]=useState("");
   const [info,setInfo]=useState("");
   const [loading,setLoading]=useState(false);
+  const [role,setRole]=useState(()=>{try{const p=JSON.parse(localStorage.getItem("pendingJoin")||"null");return p?.role||localStorage.getItem("pendingJoinRole")||"eltern";}catch(e){return "eltern";}});
+  const pendingInvite=(()=>{try{return !!JSON.parse(localStorage.getItem("pendingJoin")||"null");}catch(e){return false;}})();
+  const rememberRole=()=>{try{localStorage.setItem("pendingJoinRole",role);const p=JSON.parse(localStorage.getItem("pendingJoin")||"null");if(p){p.role=role;localStorage.setItem("pendingJoin",JSON.stringify(p));}}catch(e){}};
 
   const ERROR_MSGS={
     "auth/user-not-found":"Kein Konto mit dieser E-Mail gefunden",
@@ -5461,7 +5443,7 @@ function AuthScreen({onGoogle,onEmail,onRegister,onReset}) {
     setErr("");setInfo("");setLoading(true);
     let errCode=null;
     if(mode==="login") errCode=await onEmail(email,password);
-    else if(mode==="register") errCode=await onRegister(email,password,name);
+    else if(mode==="register"){ rememberRole(); errCode=await onRegister(email,password,name); }
     else if(mode==="reset"){
       errCode=await onReset(email);
       if(!errCode) setInfo("E-Mail zum Zurücksetzen wurde gesendet!");
@@ -5481,12 +5463,13 @@ function AuthScreen({onGoogle,onEmail,onRegister,onReset}) {
       {/* Header */}
       <div style={{textAlign:"center",marginBottom:28}}>
         <div style={{fontSize:52,marginBottom:10}}>⚽</div>
-        <div style={{fontWeight:900,fontSize:24,color:C.text}}>G-Jugend Coach</div>
-        <div style={{fontSize:13,color:C.muted,marginTop:4}}>SC Sternschanze</div>
+        <div style={{fontWeight:900,fontSize:24,color:C.text}}>Teammanager</div>
+        <div style={{fontSize:13,color:C.muted,marginTop:4}}>Termine, Teams &amp; Anmeldung</div>
       </div>
 
       {/* Card */}
       <div style={{background:"white",borderRadius:16,padding:"24px 20px",boxShadow:"0 4px 24px rgba(0,0,0,.08)",display:"flex",flexDirection:"column",gap:12}}>
+        {pendingInvite&&<div style={{fontSize:12,color:"#0369a1",padding:"8px 10px",background:"#f0f9ff",borderRadius:8,border:"1px solid #bae6fd"}}>🔗 Du wurdest zu einem Team eingeladen. Melde dich an oder registriere dich – danach trittst du automatisch bei.</div>}
         {/* Mode tabs */}
         <div style={{display:"flex",gap:0,background:"#f1f5f9",borderRadius:10,padding:3,marginBottom:4}}>
           {[["login","Anmelden"],["register","Registrieren"]].map(([k,l])=>(
@@ -5495,6 +5478,7 @@ function AuthScreen({onGoogle,onEmail,onRegister,onReset}) {
         </div>
 
         {mode==="register"&&inp(name,setName,"text","Name (Anzeigename)","name")}
+        {mode==="register"&&<div><div style={{fontSize:12,fontWeight:700,color:C.muted,marginBottom:6}}>Ich bin …</div><RolePicker value={role} onChange={setRole}/>{role==="trainer"&&<div style={{fontSize:11,color:C.muted,marginTop:6}}>Trainer-Zugänge bestätigt der Team-Admin.</div>}</div>}
         {inp(email,setEmail,"email","E-Mail-Adresse","email")}
         {mode!=="reset"&&inp(password,setPassword,"password","Passwort","current-password")}
 
@@ -5554,6 +5538,7 @@ function GroupOnboarding({user, onLogout, toast}) {
   const [code,setCode]=useState("");
   const [selectedGroupId,setSelectedGroupId]=useState("");
   const [busy,setBusy]=useState(false);
+  const [role,setRole]=useState(()=>{try{return localStorage.getItem("pendingJoinRole")||"eltern";}catch(e){return "eltern";}});
   const [requestedGroupId,setRequestedGroupId]=useState(()=>localStorage.getItem("pendingJoinRequest")||null);
   const allGroups=useAllGroups(user);
 
@@ -5561,7 +5546,7 @@ function GroupOnboarding({user, onLogout, toast}) {
   useEffect(()=>{
     if(!fbDb||!user||!requestedGroupId) return;
     const unsub=onSnapshot(doc(fbDb,"groups",requestedGroupId,"joinRequests",user.uid), snap=>{
-      if(!snap.exists()){ setRequestedGroupId(null); localStorage.removeItem("pendingJoinRequest"); }
+      if(!snap.exists()){ setRequestedGroupId(null); localStorage.removeItem("pendingJoinRequest"); window.location.reload(); }
     },()=>{});
     return unsub;
   },[user,requestedGroupId]);
@@ -5577,15 +5562,18 @@ function GroupOnboarding({user, onLogout, toast}) {
   const doJoinCode=async()=>{
     if(!code.trim()) return;
     setBusy(true);
-    const r=await joinGroupByCode(user,code.trim());
+    const r=await joinGroupByCode(user,code.trim(),role);
     setBusy(false);
-    if(r.ok) toast("Team beigetreten ✓");
-    else toast(r.error==="invalid-code"?"Code ungültig":"Fehler: "+r.error,"err");
+    if(!r.ok){ toast(r.error==="invalid-code"?"Code ungültig":"Fehler: "+r.error,"err"); return; }
+    if(r.pending){ setRequestedGroupId(r.groupId); localStorage.setItem("pendingJoinRequest",r.groupId); toast("Beitrittswunsch gesendet ✓"); return; }
+    localStorage.setItem("currentGroupId",r.groupId);
+    toast("Team beigetreten ✓");
+    setTimeout(()=>window.location.reload(),400);
   };
   const doRequestJoin=async()=>{
     if(!selectedGroupId) return;
     setBusy(true);
-    const r=await requestToJoinGroup(user,selectedGroupId);
+    const r=await requestToJoinGroup(user,selectedGroupId,role);
     setBusy(false);
     if(r.ok){ setRequestedGroupId(selectedGroupId); localStorage.setItem("pendingJoinRequest",selectedGroupId); toast("Beitrittswunsch gesendet ✓"); }
     else toast("Fehler: "+r.error,"err");
@@ -5648,7 +5636,9 @@ function GroupOnboarding({user, onLogout, toast}) {
       <input value={code} onChange={e=>setCode(e.target.value.toUpperCase())} placeholder="z.B. AB12CD" maxLength={8}
         style={{width:"100%",padding:"10px 14px",border:`1.5px solid ${C.border}`,borderRadius:10,fontSize:16,letterSpacing:2,textAlign:"center",color:C.text,background:C.bg,outline:"none",fontFamily:"inherit",textTransform:"uppercase"}}/>
       <button onClick={doJoinCode} disabled={busy||!code.trim()} style={{marginTop:14,width:"100%",padding:"12px",borderRadius:10,border:"none",background:busy||!code.trim()?"#94a3b8":C.primary,color:"white",fontWeight:800,fontSize:14,cursor:busy||!code.trim()?"default":"pointer",fontFamily:"inherit"}}>{busy?"Prüfe...":"Beitreten"}</button>
-      <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>Den Code bekommst du von deinem Trainer. Sofortiger Beitritt als „Eltern".</div>
+      <div style={{fontWeight:800,fontSize:13,color:C.text,margin:"14px 0 8px"}}>Ich bin …</div>
+      <RolePicker value={role} onChange={setRole}/>
+      <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>Den Code bekommst du von deinem Trainer. {role==="trainer"?"Trainer müssen vom Admin bestätigt werden.":"Der Beitritt erfolgt sofort."}</div>
     </div>:<div>
       {allGroups.length===0?<div style={{fontSize:13,color:C.muted,textAlign:"center",padding:"10px 0"}}>Noch keine Teams vorhanden.</div>:<>
         <select value={selectedGroupId} onChange={e=>setSelectedGroupId(e.target.value)}
@@ -5657,6 +5647,8 @@ function GroupOnboarding({user, onLogout, toast}) {
           {allGroups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
         </select>
         <button onClick={doRequestJoin} disabled={busy||!selectedGroupId} style={{marginTop:14,width:"100%",padding:"12px",borderRadius:10,border:"none",background:busy||!selectedGroupId?"#94a3b8":C.primary,color:"white",fontWeight:800,fontSize:14,cursor:busy||!selectedGroupId?"default":"pointer",fontFamily:"inherit"}}>{busy?"Sende...":"Beitritt anfragen"}</button>
+        <div style={{fontWeight:800,fontSize:13,color:C.text,margin:"14px 0 8px"}}>Ich bin …</div>
+        <RolePicker value={role} onChange={setRole}/>
         <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>Der Admin dieses Teams muss deinen Beitritt bestätigen.</div>
       </>}
     </div>}
@@ -5664,7 +5656,8 @@ function GroupOnboarding({user, onLogout, toast}) {
 }
 
 export default function App() {
-  const [page,setPage]=useState(()=>sessionStorage.getItem("gjPage")||"start");
+  const [page,setPageRaw]=useState(()=>normPage(sessionStorage.getItem("gjPage")||"start"));
+  const setPage=useCallback(p=>setPageRaw(normPage(p)),[]);
   const [darkMode,setDarkMode]=useState(()=>{try{const _prefs=JSON.parse(localStorage.getItem("personal_guest")||"{}");return _prefs.darkMode||false;}catch{return false;}});
   useEffect(()=>sessionStorage.setItem("gjPage",page),[page]);
   // Zurück-Navigation: kleine Historie (max. 5) der zuletzt besuchten Seiten
@@ -5720,7 +5713,7 @@ export default function App() {
   const [viewRoleRaw,setViewRoleRaw]=useState(null);
   useEffect(()=>{ if(user?.uid) setViewRoleRaw(localStorage.getItem("viewRole_"+user.uid)||null); },[user?.uid]);
   const hasChildLink = (myMember?.childIds||[]).length>0;
-  const roleViews = realRole==="admin" ? ["admin","trainer","eltern"] : (realRole==="trainer"&&hasChildLink) ? ["trainer","eltern"] : [];
+  const roleViews = realRole==="admin" ? ["admin","trainer","eltern","spieler"] : (realRole==="trainer"&&hasChildLink) ? ["trainer","eltern"] : [];
   // Effektive Rolle = gewählte Ansicht (nur wenn erlaubt), sonst die echte Rolle
   const role = roleViews.includes(viewRoleRaw) ? viewRoleRaw : realRole;
   const setViewRole = v => { setViewRoleRaw(v); if(user?.uid) localStorage.setItem("viewRole_"+user.uid,v); };
@@ -5742,9 +5735,9 @@ export default function App() {
   useEffect(()=>{
     if(role&&!can(role,page)){
       // trainer and eltern have access to simplified settings
-      const hasAccess=can(role,page)||(page==="settings"&&(role==="trainer"||role==="eltern"));
+      const hasAccess=can(role,page)||(page==="settings"&&(role==="trainer"||isFamily(role)));
       if(!hasAccess){
-        const allowed=["start","termine","anmeldung","calendar","library","team","training","teamplaner","turnier","kasse","orga","settings"].find(pg=>can(role,pg)||(pg==="settings"&&(role==="trainer"||role==="eltern")));
+        const allowed=["start","calendar","library","team","teamplaner","turnier","kasse","orga","settings"].find(pg=>can(role,pg)||(pg==="settings"&&(role==="trainer"||isFamily(role))));
         if(allowed) setPage(allowed);
       }
     }
@@ -5781,7 +5774,7 @@ export default function App() {
   },[players,sessions,tournaments,isCoachReal,currentGroupId,user?.uid,pr,sr,tr]);
   // Eltern: früher lokal zwischengespeicherte Trainer-Daten von diesem Gerät entfernen
   useEffect(()=>{
-    if(realRole!=="eltern") return;
+    if(!isFamily(realRole)) return;
     ["players","coaches","kassenbuch","todos","meetings","exercises","sessions","tournaments","recurringSlots","customCats","teamsets"]
       .forEach(k=>db.kv.delete("cloud_"+k).catch(()=>{}));
   },[realRole]);
@@ -5802,7 +5795,26 @@ export default function App() {
     Object.assign(CATS,merged);
   },[customCats]);
   const {toast,Toasts}=useToast();
-  const doFullBackup=async()=>{await dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"full",exercises,players,coaches,sessions,tournaments,kassenbuch,teamsets,customCats,recurringSlots},`GJugend_Backup_alle-Daten_${todayISO()}.json`,toast);setLastExportAt(new Date().toISOString());};
+  // Einladungslink/-code, der vor der Anmeldung gemerkt wurde: nach dem Login automatisch beitreten
+  useEffect(()=>{
+    if(!user||memberships===null) return;
+    let p=null; try{ p=JSON.parse(localStorage.getItem("pendingJoin")||"null"); }catch(e){}
+    if(!p||!p.code) return;
+    localStorage.removeItem("pendingJoin");
+    (async()=>{
+      const r=await joinGroupByCode(user,p.code,p.role||"eltern");
+      if(!r.ok){ toast(r.error==="invalid-code"?"Einladungscode ungültig":"Beitritt fehlgeschlagen: "+r.error,"err"); return; }
+      if(r.pending){
+        toast("Beitrittswunsch als Trainer gesendet – der Admin muss noch bestätigen");
+        if(memberships.length===0){ localStorage.setItem("pendingJoinRequest",r.groupId); setTimeout(()=>window.location.reload(),800); }
+        return;
+      }
+      localStorage.setItem("currentGroupId",r.groupId);
+      toast(r.already?"Du bist bereits in diesem Team":"Team beigetreten ✓");
+      setTimeout(()=>window.location.reload(),600);
+    })();
+  },[user,memberships]);
+  const doFullBackup=async()=>{await dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"full",exercises,players,coaches,sessions,tournaments,kassenbuch,teamsets,customCats,recurringSlots},`Teammanager_Backup_alle-Daten_${todayISO()}.json`,toast);setLastExportAt(new Date().toISOString());};
   const [undoBuf,setUndoBuf]=useState(null);
   function showUndo(label,item,restoreFn){
     if(undoBuf?.t)clearTimeout(undoBuf.t);
@@ -5823,6 +5835,8 @@ export default function App() {
 
   const saveEx=x=>{ setExercises(upsert(x));logActivity(user,"exercise_saved",x.title||"");toast('Übung gespeichert'); };
   const savePl=x=>{ setPlayers(upsert(x));logActivity(user,"player_saved",x.name||"");toast('Spieler gespeichert'); };
+  // Neues Spielerprofil (z. B. aus einem Spieler-Konto heraus) – gibt die neue ID zurück
+  const createPlayerProfile=name=>{ const p={...EMPTY_PLAYER,id:uid(),name:(name||"").trim()}; savePl(p); return p.id; };
   const saveCo=x=>{ setCoaches(upsert(x));logActivity(user,"coach_saved",x.name||"");toast('Trainer gespeichert'); };
   const saveSe=x=>{ setSessions(upsert(x));logActivity(user,"session_saved",x.date||"");toast('Training gespeichert'); };
   const saveTo=x=>{ setTournaments(upsert(x)); };
@@ -5876,20 +5890,18 @@ export default function App() {
     <Toasts/>
     <Nav page={page} setPage={setPage} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0,openRsvps}}/>
     <main className="gm" style={{display:"block",zoom:prefs.fontScale||1}}>
-      {page==="start"&&role==="eltern"&&<ParentStartPage currentUser={user} events={rsvpEvents} myKids={myKids} rsvps={rsvps} openRsvps={openRsvps} onNavigate={setPage}/>}
-      {page==="termine"&&can(role,"termine")&&<ParentTermine events={rsvpEvents} myKids={myKids} rsvps={rsvps} onNavigate={setPage} onlineUsers={onlineUsers} currentUser={user}/>}
-      {page==="start"&&role!=="eltern"&&<StartPage players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} todos={todos} meetings={meetings} teamsets={teamsets} kassenbuch={kassenbuch} exercises={exercises} role={role} openRsvps={openRsvps} currentUser={user} onlineUsers={onlineUsers} onNavigate={setPage} onOpenLibraryCategory={cat=>{setPendingLibraryCat(cat);setPage("library");}} onOpenOrgaItem={target=>{setPendingOrgaTarget(target);setPage("orga");}} onOpenCalendarItem={target=>{setPendingCalendarTarget(target);setPage("calendar");}} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} onSaveExercise={saveEx} onDeleteExercise={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="start"&&isFamily(role)&&<ParentStartPage role={role} currentUser={user} events={rsvpEvents} myKids={myKids} rsvps={rsvps} openRsvps={openRsvps} onNavigate={setPage}/>}
+      {page==="start"&&!isFamily(role)&&<StartPage players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} todos={todos} meetings={meetings} teamsets={teamsets} kassenbuch={kassenbuch} exercises={exercises} role={role} openRsvps={openRsvps} currentUser={user} onlineUsers={onlineUsers} onNavigate={setPage} onOpenLibraryCategory={cat=>{setPendingLibraryCat(cat);setPage("library");}} onOpenOrgaItem={target=>{setPendingOrgaTarget(target);setPage("orga");}} onOpenCalendarItem={target=>{setPendingCalendarTarget(target);setPage("calendar");}} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} onSaveExercise={saveEx} onDeleteExercise={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="library"  &&<LibraryPage  exercises={exercises} onSave={saveEx} onDelete={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} apiKey={apiKey} toast={toast} onlineUsers={onlineUsers} currentUser={user} initialCategory={pendingLibraryCat} onConsumeInitialCategory={()=>setPendingLibraryCat(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="team"     &&<TeamPage     players={players} coaches={coaches} sessions={sessions} onSaveSession={saveSe} onSavePlayer={can(role,"editAnything")?savePl:null} onDeletePlayer={can(role,"editAnything")?id=>{const i=players.find(p=>p.id===id);setPlayers(prev=>prev.filter(p=>p.id!==id));showUndo("Spieler",i,()=>setPlayers(prev=>[i,...prev]));}:null} onSaveCoach={can(role,"editAnything")?saveCo:null} onDeleteCoach={can(role,"editAnything")?id=>{const i=coaches.find(c=>c.id===id);setCoaches(prev=>prev.filter(c=>c.id!==id));showUndo("Trainer",i,()=>setCoaches(prev=>[i,...prev]));}:null} toast={toast} showStrength={can(role,"seeStrength")} readOnly={!can(role,"editAnything")} onAddToTraining={can(role,"editAnything")?({playerIds,coachIds,kids,coachCount})=>{setPendingSetup({playerIds,coachIds,kids:kids||playerIds.length,coachCount:coachCount||1,date:todayISO(),location:"outdoor",focus:""});setPage("training");}:null} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="orga"&&can(role,"orga")&&<OrgaPage todos={todos} onSaveTodo={saveTodo} onDeleteTodo={id=>{const i=todos.find(t=>t.id===id);setTodos(prev=>prev.filter(t=>t.id!==id));showUndo("Task",i,()=>setTodos(prev=>[i,...prev]));}} coaches={coaches} currentUser={user} toast={toast} showUndo={showUndo} readOnly={!can(role,"editAnything")} onlineUsers={onlineUsers} pendingTarget={pendingOrgaTarget} onClearPendingTarget={()=>setPendingOrgaTarget(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="teamplaner"&&<TeamplanerPage players={players} teamsets={teamsets} onSaveTeamset={can(role,"editAnything")?saveTSets:null} onDeleteTeamset={can(role,"editAnything")?id=>{const i=teamsets.find(t=>t.id===id);setTeamsets(prev=>prev.filter(t=>t.id!==id));showUndo("Team-Aufstellung",i,()=>setTeamsets(prev=>[i,...prev]));}:null} readOnly={!can(role,"editAnything")} showStrength={can(role,"seeStrength")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
-      {page==="training" &&<TrainingPage sessions={sessions} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} apiKey={apiKey} toast={toast} onSaveExercise={saveEx} pendingSetup={pendingSetup} onClearPendingSetup={()=>setPendingSetup(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} onGoToCalendar={()=>setPage("calendar")} recurringSlots={recurringSlots} onSaveSlot={saveSlot} onDeleteSlot={id=>{const i=recurringSlots.find(s=>s.id===id);setRecurringSlots(prev=>prev.filter(s=>s.id!==id));showUndo("Serientermin",i,()=>setRecurringSlots(prev=>[i,...prev]));}} onGenerateSessions={generateSessions}/>}
       {page==="turnier"  &&<TurnierPage  tournaments={tournaments} onSaveTournament={saveTo} onDeleteTournament={id=>{const i=tournaments.find(t=>t.id===id);setTournaments(prev=>prev.filter(t=>t.id!==id));showUndo("Turnier",i,()=>setTournaments(prev=>[i,...prev]));}} coaches={coaches} players={players} onSavePlayer={can(role,"editAnything")?savePl:null} onlineUsers={onlineUsers} currentUser={user} toast={toast} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} initialOpenId={pendingTurnierId} onClearInitialOpen={()=>setPendingTurnierId(null)}/>}
-      {page==="calendar" &&<CalendarPage sessions={sessions} meetings={meetings} tournaments={tournaments} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} onSaveMeeting={saveMeeting} onDeleteMeeting={id=>{const i=meetings.find(m=>m.id===id);setMeetings(prev=>prev.filter(m=>m.id!==id));showUndo("Trainertreff",i,()=>setMeetings(prev=>[i,...prev]));}} onSaveTournament={saveTo} onSaveExercise={saveEx} apiKey={apiKey} toast={toast} readOnly={!can(role,"editAnything")} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} pendingTarget={pendingCalendarTarget} onClearPendingTarget={()=>setPendingCalendarTarget(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
-      {page==="anmeldung"&&can(role,"anmeldung")&&<RsvpPage role={role} events={rsvpEvents} players={rsvpPlayers} rsvps={rsvps} onSetRsvp={setRsvp} myKids={myKids} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="calendar"&&isFamily(role)&&<RsvpPage role={role} events={rsvpEvents} players={rsvpPlayers} rsvps={rsvps} onSetRsvp={setRsvp} myKids={myKids} toast={toast} onlineUsers={onlineUsers} currentUser={user}/>}
+      {page==="calendar"&&!isFamily(role)&&<CalendarPage rsvps={rsvps} onSetRsvp={setRsvp} pendingSetup={pendingSetup} onClearPendingSetup={()=>setPendingSetup(null)} onOpenTurnierPage={()=>setPage("turnier")} recurringSlots={recurringSlots} onSaveSlot={saveSlot} onDeleteSlot={id=>{const i=recurringSlots.find(s=>s.id===id);setRecurringSlots(prev=>prev.filter(s=>s.id!==id));showUndo("Serientermin",i,()=>setRecurringSlots(prev=>[i,...prev]));}} onGenerateSessions={generateSessions} sessions={sessions} meetings={meetings} tournaments={tournaments} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} onSaveMeeting={saveMeeting} onDeleteMeeting={id=>{const i=meetings.find(m=>m.id===id);setMeetings(prev=>prev.filter(m=>m.id!==id));showUndo("Trainertreff",i,()=>setMeetings(prev=>[i,...prev]));}} onSaveTournament={saveTo} onSaveExercise={saveEx} apiKey={apiKey} toast={toast} readOnly={!can(role,"editAnything")} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} pendingTarget={pendingCalendarTarget} onClearPendingTarget={()=>setPendingCalendarTarget(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="kasse"    &&can(role,"kasse")&&<KassePage kassenbuch={kassenbuch} onSave={can(role,"editKasse")?saveKa:null} onDelete={can(role,"editKasse")?id=>{const i=kassenbuch.find(k=>k.id===id);setKassenbuch(prev=>prev.filter(k=>k.id!==id));showUndo("Eintrag",i,()=>setKassenbuch(prev=>[i,...prev]));}:null} readOnly={!can(role,"editKasse")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
-      {page==="settings"&&role==="eltern"&&<ParentSettingsPage firebaseUser={user} groupId={currentGroupId} myKids={myKids} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onLogout={logout} toast={toast} onlineUsers={onlineUsers}/>}
-      {(can(role,"settings")||role==="trainer")&&page==="settings"&&<SettingsPage key={role} exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={setCurrentGroupId} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="settings"&&isFamily(role)&&<ParentSettingsPage role={role} memberships={memberships} onSwitchGroup={setCurrentGroupId} firebaseUser={user} groupId={currentGroupId} myKids={myKids} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onLogout={logout} toast={toast} onlineUsers={onlineUsers}/>}
+      {(can(role,"settings")||role==="trainer")&&page==="settings"&&<SettingsPage key={role} onCreatePlayer={createPlayerProfile} exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={setCurrentGroupId} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
     </main>
     {undoBuf&&<div style={{position:"fixed",bottom:76,left:12,right:12,zIndex:9999,display:"flex",alignItems:"center",gap:10,background:"#1e293b",color:"white",borderRadius:12,padding:"12px 16px",boxShadow:"0 4px 24px rgba(0,0,0,.35)"}}>
       <span style={{fontSize:13,fontWeight:600,flex:1}}>{undoBuf.label}</span>
