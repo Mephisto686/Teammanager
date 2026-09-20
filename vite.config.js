@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
-// ⚠️  ANPASSEN: Ersetze "gjugend-coach" mit deinem GitHub Repository-Namen
+// ⚠️  Muss dem Namen des GitHub-Repositories entsprechen (bestimmt die Adresse der App)
 const REPO_NAME = "Teammanager";
 
 export default defineConfig({
@@ -13,9 +13,9 @@ export default defineConfig({
       registerType: "autoUpdate",
       includeAssets: ["icon-192.png", "icon-512.png", "apple-touch-icon.png"],
       manifest: {
-        name: "G-Jugend Coach",
-        short_name: "Coach",
-        description: "Trainings-App für G-Jugend Fußball",
+        name: "Teammanager",
+        short_name: "Teammanager",
+        description: "Termine, Teams und Anmeldung für Jugendmannschaften",
         theme_color: "#0f2419",
         background_color: "#f0f4f0",
         display: "standalone",
