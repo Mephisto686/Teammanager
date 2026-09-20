@@ -136,7 +136,7 @@ async function createGroup(user, name) {
     await setDoc(doc(fbDb, "groups", groupId, "settings", "invite"), { code, expiresAtMs: null });
     await setDoc(doc(fbDb, "inviteCodes", code), { groupId, expiresAtMs: null, createdAt: new Date().toISOString(), createdBy: user.uid });
     await setDoc(doc(fbDb, "groups", groupId, "members", user.uid), {
-      uid: user.uid, role: "admin", name: user.displayName || "", email: user.email || "",
+      uid: user.uid, role: "admin", name: ownName(user), email: user.email || "",
       photo: user.photoURL || null, joinedAt: new Date().toISOString()
     });
     return { ok: true, groupId };
@@ -150,17 +150,17 @@ async function joinCore(user, groupId, rolesIn, opts = {}) {
   const memRef = doc(fbDb, "groups", groupId, "members", user.uid);
   // Schon Mitglied (z. B. Admin öffnet Einladungslink): nichts überschreiben
   if ((await getDoc(memRef)).exists()) return { ok: true, groupId, already: true };
-  const base = { uid: user.uid, name: user.displayName || "", email: user.email || "", photo: user.photoURL || null };
+  const base = { uid: user.uid, name: ownName(user), email: user.email || "", photo: user.photoURL || null };
   const direct = ["eltern","spieler"].filter(r => roles.includes(r));
   let pending = roles.filter(r => r === "trainer");
   let joined = false;
-  if (direct.length && (opts.code || opts.open)) {
+  if (direct.length && opts.code) {
     const memberDoc = { ...base, role: primaryRole(direct), roles: direct, joinedAt: new Date().toISOString() };
     if (opts.code) memberDoc.joinCode = opts.code;
     await setDoc(memRef, memberDoc);
     joined = true;
   } else {
-    pending = roles; // kein direkter Beitritt möglich (geschlossenes Team ohne Code): alles muss bestätigt werden
+    pending = roles; // ohne gültigen Code kein direkter Beitritt: alles muss bestätigt werden
   }
   if (pending.length) {
     const reqRef = doc(fbDb, "groups", groupId, "joinRequests", user.uid);
@@ -179,28 +179,6 @@ async function joinGroupByCode(user, code, roles = ["eltern"]) {
     const cd = codeSnap.data();
     if (cd.expiresAtMs && Date.now() > cd.expiresAtMs) return { ok: false, error: "expired-code" };
     return await joinCore(user, cd.groupId, roles, { code: c });
-  } catch (e) { return { ok: false, error: e.code || "unknown" }; }
-}
-// Beitritt über die Team-Auswahl ohne Code: nur in offenen Teams sofort (Standard), sonst Beitrittswunsch
-async function joinGroupOpen(user, groupId, roles = ["eltern"]) {
-  if (!fbDb || !user || !groupId) return { ok: false, error: "invalid" };
-  try {
-    const g = await getDoc(doc(fbDb, "groups", groupId));
-    const open = g.exists() && g.data().openJoin !== false;
-    return await joinCore(user, groupId, roles, { open });
-  } catch (e) { return { ok: false, error: e.code || "unknown" }; }
-}
-
-// Beitrittswunsch ohne Code — Admin der Zielgruppe muss aktiv bestätigen
-async function requestToJoinGroup(user, groupId, role = "eltern") {
-  if (!fbDb || !user) return { ok: false, error: "invalid" };
-  try {
-    await setDoc(doc(fbDb, "groups", groupId, "joinRequests", user.uid), {
-      uid: user.uid, name: user.displayName || "", email: user.email || "",
-      photo: user.photoURL || null, requestedAt: new Date().toISOString(),
-      requestedRole: role === "trainer" || role === "spieler" ? role : "eltern"
-    });
-    return { ok: true };
   } catch (e) { return { ok: false, error: e.code || "unknown" }; }
 }
 async function cancelJoinRequest(user, groupId) {
@@ -318,6 +296,8 @@ const memberRoles = m => {
 };
 const primaryRole = roles => ROLE_ORDER.find(r=>roles.includes(r)) || roles[0] || "eltern";
 // Rollen, die man beim Beitritt/Registrieren wählen kann (mehrere möglich). Eltern/Spieler treten sofort bei, Trainer braucht die Bestätigung des Admins.
+// Anzeigename des Nutzers: Profilname, sonst der bei der Registrierung eingegebene Name (falls das Profil noch nicht aktualisiert ist)
+const ownName = u => (u && u.displayName) || (()=>{ try{ return localStorage.getItem("pendingDisplayName")||""; }catch(e){ return ""; } })();
 const JOIN_ROLES = ["eltern","spieler","trainer"];
 const parseJoinRoles = v => {
   let a = v;
@@ -374,6 +354,7 @@ function useRole(user) {
         const updates={};
         if(user.email&&snap.data().email!==user.email) updates.email=user.email;
         if(user.displayName&&snap.data().name!==user.displayName) updates.name=user.displayName;
+        else if(!snap.data().name){ const nm=ownName(user); if(nm) updates.name=nm; }
         if(user.photoURL&&snap.data().photo!==user.photoURL) updates.photo=user.photoURL;
         if(Object.keys(updates).length>0) setDoc(doc(fbDb,"roles",user.uid),updates,{merge:true}).catch(()=>{});
         setRole(snap.data().role||"pending");
@@ -384,7 +365,7 @@ function useRole(user) {
           const rolesSnap=await getDocs(collection(fbDb,"roles"));
           const newRole=rolesSnap.empty?"admin":"pending";
           await setDoc(doc(fbDb,"roles",user.uid),{
-            uid:user.uid, name:user.displayName||"",
+            uid:user.uid, name:ownName(user),
             email:user.email||"",
             photo:user.photoURL||null, role:newRole,
             createdAt:new Date().toISOString()
@@ -745,7 +726,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.38.0";
+const APP_VERSION = "3.39.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4718,12 +4699,6 @@ function TeamsCard({user,groupId,memberships,onSwitchGroup,toast,canRename=false
   const [busy,setBusy]=useState(false);
   const [newName,setNewName]=useState("");
   const nameOf=gid=>allGroups.find(g=>g.id===gid)?.name||gid;
-  const groupOpen=allGroups.find(g=>g.id===groupId)?.openJoin!==false;
-  // Admin: Offener Beitritt – Eltern/Spieler dürfen auch ohne Code aus der Team-Liste beitreten
-  const toggleOpen=async()=>{
-    try{ await setDoc(doc(fbDb,"groups",groupId),{openJoin:!groupOpen},{merge:true}); writeLog(groupId,user,"team",`Offener Beitritt ${!groupOpen?"eingeschaltet":"ausgeschaltet"}`,"coach"); }
-    catch(e){ toast("Speichern nicht möglich","err"); }
-  };
   const goto=gid=>{ try{localStorage.setItem("currentGroupId",gid);}catch(e){} setTimeout(()=>window.location.reload(),400); };
   const doCreate=async()=>{
     if(!name.trim()) return; setBusy(true);
@@ -4762,10 +4737,6 @@ function TeamsCard({user,groupId,memberships,onSwitchGroup,toast,canRename=false
       <Btn sm variant="secondary" onClick={()=>setModal("create")}>➕ Weiteres Team anlegen</Btn>
       <Btn sm variant="secondary" onClick={()=>setModal("join")}>🔗 Team beitreten</Btn>
     </div>
-    {canRename&&<label style={{display:"flex",alignItems:"flex-start",gap:8,marginTop:12,fontSize:12,color:C.text,cursor:"pointer"}}>
-      <input type="checkbox" checked={groupOpen} onChange={toggleOpen} style={{marginTop:2}}/>
-      <span><b>Offener Beitritt:</b> Eltern und Spieler können auch ohne Code aus der Team-Liste beitreten – ohne Bestätigung. Ausgeschaltet gelingt der sofortige Beitritt nur mit Einladungscode oder -link.</span>
-    </label>}
     {modal==="rename"&&<Modal title="Team umbenennen" onClose={()=>setModal(null)}>
       <div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:8}}>Neuer Name des Teams / Vereins</div>
       <input value={newName} onChange={e=>setNewName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")doRename();}} maxLength={60} style={inp}/>
@@ -4910,9 +4881,10 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
             const mr=memberRoles(m);
             const isSelf=m.uid===firebaseUser?.uid;
             return(<div key={m.uid} style={{display:"flex",alignItems:"center",flexWrap:"wrap",gap:10,padding:"10px 14px",borderRadius:10,background:C.card,border:`1.5px solid ${C.border}`}}>
-              {m.photo?<img src={m.photo} width={32} height={32} style={{borderRadius:"50%",flexShrink:0}}/>:<div style={{width:32,height:32,borderRadius:"50%",background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,color:C.primary,flexShrink:0}}>{(m.name||"?")[0].toUpperCase()}</div>}
+              {m.photo?<img src={m.photo} width={32} height={32} style={{borderRadius:"50%",flexShrink:0}}/>:<div style={{width:32,height:32,borderRadius:"50%",background:C.accentL,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,color:C.primary,flexShrink:0}}>{(m.name||m.email||"?")[0].toUpperCase()}</div>}
               <div style={{flex:1,minWidth:0}}>
-                <div style={{fontWeight:700,fontSize:13,color:C.text}}>{m.name||m.email}{isSelf&&<span style={{fontSize:11,color:C.muted}}> (du)</span>}</div>
+                <div style={{fontWeight:700,fontSize:13,color:C.text}}>{m.name||<span style={{color:C.muted,fontStyle:"italic",fontWeight:600}}>Kein Name angegeben</span>}{isSelf&&<span style={{fontSize:11,color:C.muted}}> (du)</span>}</div>
+                <div style={{fontSize:11,color:C.muted,marginTop:1,wordBreak:"break-all"}}>{m.email}</div>
                 {mr.some(isFamily)&&!(m.childIds||[]).length&&<div style={{fontSize:11,color:"#b45309",marginTop:2}}>⚠ noch nicht mit {mr.includes("spieler")&&!mr.includes("eltern")?"einem Spielerprofil":"einem Kind"} verknüpft</div>}
               </div>
               {!canManage&&<div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{mr.map(k=>{const rr=USER_ROLES[k]||USER_ROLES.eltern;return <span key={k} style={{padding:"4px 10px",borderRadius:20,border:`1.5px solid ${rr.color}`,background:rr.bg,color:rr.color,fontWeight:700,fontSize:12}}>{rr.emoji} {rr.label}</span>;})}</div>}
@@ -5584,8 +5556,9 @@ function StartCatRow({label,catInfo,exs,onSeeAll,onOpenEx}) {
   </div>);
 }
 
-function Nav({page,setPage,counts}) {
+function Nav({page,setPage,counts,onLogout}) {
   const [menuOpen,setMenuOpen]=useState(false);
+  const askLogout=()=>{ if(onLogout&&window.confirm("Wirklich abmelden?")) onLogout(); };
 
   const allItems=[
     {key:"start",    icon:Home,      label:"Start"},
@@ -5634,6 +5607,7 @@ function Nav({page,setPage,counts}) {
         <div style={{fontSize:10,color:"rgba(255,255,255,.3)",marginTop:2}}>v{APP_VERSION}</div>
       </div>
       {visible.map(({key,icon:Icon,label,count})=><button key={key} onClick={()=>setPage(key)} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:10,border:"none",cursor:"pointer",marginBottom:4,width:"100%",textAlign:"left",fontFamily:"inherit",background:page===key?"rgba(34,197,94,.2)":"transparent",color:page===key?"#4ade80":"rgba(255,255,255,.6)"}}><Icon size={18} strokeWidth={page===key?2.5:1.8}/><span style={{fontSize:14,fontWeight:700,flex:1}}>{label}</span>{count!==undefined&&<span style={{fontSize:11,background:"rgba(255,255,255,.1)",borderRadius:20,padding:"1px 7px",color:"rgba(255,255,255,.5)"}}>{count}</span>}</button>)}
+      {onLogout&&<button onClick={askLogout} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:10,border:"none",cursor:"pointer",marginTop:"auto",width:"100%",textAlign:"left",fontFamily:"inherit",background:"transparent",color:"rgba(255,255,255,.6)"}}><span style={{fontSize:16}}>🔓</span><span style={{fontSize:14,fontWeight:700}}>Abmelden</span></button>}
     </div>
     {/* Mobile bottom nav */}
     <div className="gb">
@@ -5674,7 +5648,10 @@ function Nav({page,setPage,counts}) {
           </div>);
         })}
       </div>
-      <div style={{padding:"10px 18px",borderTop:`1px solid ${C.border}`,fontSize:10,color:C.muted,flexShrink:0}}>v{APP_VERSION}</div>
+      <div style={{padding:"10px 18px",borderTop:`1px solid ${C.border}`,fontSize:10,color:C.muted,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+        {onLogout&&<button onClick={()=>{setMenuOpen(false);askLogout();}} style={{padding:"7px 14px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",color:"#ef4444",fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>🔓 Abmelden</button>}
+        <span>v{APP_VERSION}</span>
+      </div>
     </div>
   </>);
 }
@@ -5964,8 +5941,10 @@ function useFirebaseAuth() {
   };
   const registerEmail = async(email,password,name) => {
     try {
+      try{ localStorage.setItem("pendingDisplayName",(name||"").trim()); }catch(e){}
       const cred=await createUserWithEmailAndPassword(fbAuth,email,password);
       if(name) await updateProfile(cred.user,{displayName:name});
+      try{ await cred.user.reload(); }catch(e){}
       return null;
     } catch(e) { return e.code; }
   };
@@ -6036,6 +6015,7 @@ function useCloudStorage(key, def, user, groupId=DEFAULT_GROUP_ID) {
 function PageHeader({title, sub, onlineUsers, currentUser, onGoHome, onGoBack}) {
   const [showList,setShowList]=useState(false);
   const users=onlineUsers||[];
+  const authCtx=React.useContext(RoleSwitchCtx);
   return(
     <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:16}}>
       <div style={{minWidth:0,display:"flex",alignItems:"flex-start",gap:10}}>
@@ -6071,6 +6051,10 @@ function PageHeader({title, sub, onlineUsers, currentUser, onGoHome, onGoBack}) 
               {u.uid===currentUser?.uid&&<span style={{fontSize:10,color:C.muted}}>(du)</span>}
               <div style={{width:7,height:7,borderRadius:"50%",background:"#22c55e"}}/>
             </div>)}
+            {authCtx?.logout&&<div style={{borderTop:`1px solid ${C.border}`,margin:"6px 8px 2px",paddingTop:6}}>
+              <div style={{fontSize:11,color:C.muted,padding:"2px 4px 6px",wordBreak:"break-all"}}>Angemeldet als {currentUser?.displayName||currentUser?.email||"–"}</div>
+              <button onClick={()=>{setShowList(false);if(window.confirm("Wirklich abmelden?"))authCtx.logout();}} style={{display:"block",width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid #fca5a5",background:"#fff5f5",color:"#ef4444",fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit",textAlign:"left"}}>🔓 Abmelden</button>
+            </div>}
           </div>
         </>}
       </div>}
@@ -6196,10 +6180,8 @@ function BackupBanner({lastExportAt,onBackup}) {
 // ── ONBOARDING: Team anlegen oder beitreten ────────────────────────
 function GroupOnboarding({user, onLogout, toast}) {
   const [mode,setMode]=useState(null); // null | "create" | "join"
-  const [joinTab,setJoinTab]=useState("code"); // "code" | "browse"
   const [name,setName]=useState("");
   const [code,setCode]=useState("");
-  const [selectedGroupId,setSelectedGroupId]=useState("");
   const [busy,setBusy]=useState(false);
   const [roles,setRoles]=useState(()=>{try{return parseJoinRoles(localStorage.getItem("pendingJoinRole"));}catch(e){return ["eltern"];}});
   const [requestedGroupId,setRequestedGroupId]=useState(()=>localStorage.getItem("pendingJoinRequest")||null);
@@ -6232,15 +6214,6 @@ function GroupOnboarding({user, onLogout, toast}) {
     localStorage.setItem("currentGroupId",r.groupId);
     toast(r.pending?"Beigetreten – die Trainer-Rolle bestätigt noch der Admin":"Team beigetreten ✓");
     setTimeout(()=>window.location.reload(),400);
-  };
-  const doRequestJoin=async()=>{
-    if(!selectedGroupId) return;
-    setBusy(true);
-    const r=await joinGroupOpen(user,selectedGroupId,roles);
-    setBusy(false);
-    if(!r.ok){ toast("Fehler: "+r.error,"err"); return; }
-    if(r.joined||r.already){ localStorage.setItem("currentGroupId",selectedGroupId); toast(r.pending?"Beigetreten – die Trainer-Rolle bestätigt noch der Admin":"Team beigetreten ✓"); setTimeout(()=>window.location.reload(),500); return; }
-    setRequestedGroupId(selectedGroupId); localStorage.setItem("pendingJoinRequest",selectedGroupId); toast("Beitrittswunsch gesendet ✓");
   };
   const cancelRequest=async()=>{
     await cancelJoinRequest(user,requestedGroupId);
@@ -6289,33 +6262,16 @@ function GroupOnboarding({user, onLogout, toast}) {
     <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>Du wirst automatisch Admin dieses Teams. Ein Einladungscode wird erzeugt.</div>
   </Shell>;
 
-  // mode==="join"
+  // mode==="join": nur mit Einladungscode oder -link
   return <Shell>
     <button onClick={()=>setMode(null)} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:13,padding:0,marginBottom:14,fontFamily:"inherit"}}>← Zurück</button>
-    <div style={{display:"flex",gap:4,background:"#f1f5f9",borderRadius:10,padding:4,marginBottom:16}}>
-      <button onClick={()=>setJoinTab("code")} style={{flex:1,padding:"7px",borderRadius:7,border:"none",cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"inherit",background:joinTab==="code"?C.primary:"transparent",color:joinTab==="code"?"white":C.muted}}>Code eingeben</button>
-      <button onClick={()=>setJoinTab("browse")} style={{flex:1,padding:"7px",borderRadius:7,border:"none",cursor:"pointer",fontWeight:700,fontSize:13,fontFamily:"inherit",background:joinTab==="browse"?C.primary:"transparent",color:joinTab==="browse"?"white":C.muted}}>Team wählen</button>
-    </div>
-    {joinTab==="code"?<div>
-      <input value={code} onChange={e=>setCode(e.target.value.toUpperCase())} placeholder="z.B. AB12CD" maxLength={8}
-        style={{width:"100%",padding:"10px 14px",border:`1.5px solid ${C.border}`,borderRadius:10,fontSize:16,letterSpacing:2,textAlign:"center",color:C.text,background:C.bg,outline:"none",fontFamily:"inherit",textTransform:"uppercase"}}/>
-      <button onClick={doJoinCode} disabled={busy||!code.trim()} style={{marginTop:14,width:"100%",padding:"12px",borderRadius:10,border:"none",background:busy||!code.trim()?"#94a3b8":C.primary,color:"white",fontWeight:800,fontSize:14,cursor:busy||!code.trim()?"default":"pointer",fontFamily:"inherit"}}>{busy?"Prüfe...":"Beitreten"}</button>
-      <div style={{fontWeight:800,fontSize:13,color:C.text,margin:"14px 0 8px"}}>Ich bin …</div>
-      <RolePicker value={roles} onChange={setRoles}/>
-      <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>Den Code bekommst du von deinem Trainer. {roles.includes("trainer")?"Die Trainer-Rolle bestätigt der Admin, alles andere gilt sofort.":"Der Beitritt erfolgt sofort."}</div>
-    </div>:<div>
-      {allGroups.length===0?<div style={{fontSize:13,color:C.muted,textAlign:"center",padding:"10px 0"}}>Noch keine Teams vorhanden.</div>:<>
-        <select value={selectedGroupId} onChange={e=>setSelectedGroupId(e.target.value)}
-          style={{width:"100%",padding:"10px 14px",border:`1.5px solid ${C.border}`,borderRadius:10,fontSize:14,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit"}}>
-          <option value="">— Team wählen —</option>
-          {allGroups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
-        </select>
-        <button onClick={doRequestJoin} disabled={busy||!selectedGroupId} style={{marginTop:14,width:"100%",padding:"12px",borderRadius:10,border:"none",background:busy||!selectedGroupId?"#94a3b8":C.primary,color:"white",fontWeight:800,fontSize:14,cursor:busy||!selectedGroupId?"default":"pointer",fontFamily:"inherit"}}>{busy?"Bitte warten…":"Beitreten"}</button>
-        <div style={{fontWeight:800,fontSize:13,color:C.text,margin:"14px 0 8px"}}>Ich bin …</div>
-        <RolePicker value={roles} onChange={setRoles}/>
-        <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>{allGroups.find(g=>g.id===selectedGroupId)?.openJoin===false?"Dieses Team ist geschlossen: Dein Beitrittswunsch geht an den Admin.":"Eltern und Spieler treten sofort bei. Die Trainer-Rolle bestätigt der Admin."}</div>
-      </>}
-    </div>}
+    <div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:8}}>Einladungscode</div>
+    <input value={code} onChange={e=>setCode(e.target.value.toUpperCase())} placeholder="z.B. AB12CD" maxLength={8}
+      style={{width:"100%",padding:"10px 14px",border:`1.5px solid ${C.border}`,borderRadius:10,fontSize:16,letterSpacing:2,textAlign:"center",color:C.text,background:C.bg,outline:"none",fontFamily:"inherit",textTransform:"uppercase",boxSizing:"border-box"}}/>
+    <div style={{fontWeight:800,fontSize:13,color:C.text,margin:"14px 0 8px"}}>Ich bin …</div>
+    <RolePicker value={roles} onChange={setRoles}/>
+    <button onClick={doJoinCode} disabled={busy||!code.trim()} style={{marginTop:14,width:"100%",padding:"12px",borderRadius:10,border:"none",background:busy||!code.trim()?"#94a3b8":C.primary,color:"white",fontWeight:800,fontSize:14,cursor:busy||!code.trim()?"default":"pointer",fontFamily:"inherit"}}>{busy?"Prüfe...":"Beitreten"}</button>
+    <div style={{fontSize:11,color:C.muted,marginTop:10,textAlign:"center"}}>Den Code oder Link bekommst du von deinem Trainer oder Team-Admin. {roles.includes("trainer")?"Die Trainer-Rolle bestätigt der Admin, alles andere gilt sofort.":"Der Beitritt erfolgt sofort."}</div>
   </Shell>;
 }
 
@@ -6391,6 +6347,13 @@ export default function App() {
   if(roleViews.length<2) roleViews=[];
   // Effektive Rolle = gewählte Ansicht (nur wenn erlaubt), sonst die echte Rolle
   const role = roleViews.includes(viewRoleRaw) ? viewRoleRaw : realRole;
+  // Leerer Name im eigenen Mitgliedsdokument (z. B. Konto vor Einführung der Namen angelegt): mit dem Profilnamen füllen
+  useEffect(()=>{
+    if(!fbDb||!user||!currentGroupId||!myMember) return;
+    const n=ownName(user);
+    if(n&&!myMember.name) setDoc(doc(fbDb,"groups",currentGroupId,"members",user.uid),{name:n},{merge:true}).catch(()=>{});
+    if(user.displayName){ try{ localStorage.removeItem("pendingDisplayName"); }catch(e){} }
+  },[user,currentGroupId,myMember?.name]); // eslint-disable-line
   const setViewRole = v => { setViewRoleRaw(v); if(user?.uid&&currentGroupId) localStorage.setItem(`viewRole_${user.uid}_${currentGroupId}`,v); };
   const [prefs, setPrefs] = usePersonalSettings(user?.uid);
   // Offene Beitrittswünsche der aktuellen Gruppe (nur relevant für den Gruppen-Admin)
@@ -6585,10 +6548,10 @@ export default function App() {
   // In keiner Gruppe? → Onboarding (Team anlegen oder beitreten). Jeder eingeloggte Nutzer landet hier,
   // niemand wird mehr global blockiert.
   if(memberships.length===0||!currentGroupId) return <GroupOnboarding user={user} onLogout={logout} toast={toast}/>;
-  return(<RoleSwitchCtx.Provider value={{views:roleViews,viewRole:role,realRole,setViewRole,teams:(memberships||[]).map(m=>({id:m.groupId,name:allGroups.find(g=>g.id===m.groupId)?.name||m.groupId,role:m.role,roles:memberRoles(m)})),currentTeamId:currentGroupId,switchTeam:switchGroup,manageTeams:()=>setPage("settings")}}><div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:C.bg,minHeight:"100vh"}}>
+  return(<RoleSwitchCtx.Provider value={{views:roleViews,viewRole:role,realRole,setViewRole,teams:(memberships||[]).map(m=>({id:m.groupId,name:allGroups.find(g=>g.id===m.groupId)?.name||m.groupId,role:m.role,roles:memberRoles(m)})),currentTeamId:currentGroupId,switchTeam:switchGroup,manageTeams:()=>setPage("settings"),logout}}><div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:C.bg,minHeight:"100vh"}}>
     <style>{`*{box-sizing:border-box}body{margin:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}`}</style>
     <Toasts/>
-    <Nav page={page} setPage={setPage} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0,openRsvps}}/>
+    <Nav page={page} setPage={setPage} onLogout={logout} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0,openRsvps}}/>
     <main className="gm" style={{display:"block",zoom:prefs.fontScale||1}}>
       {needsChildSetup?<ChildSetupPage role={role} players={rsvpPlayers} groupId={currentGroupId} toast={toast} onSkip={()=>{try{localStorage.setItem(`childSkip_${user.uid}_${currentGroupId}`,"1");}catch(e){} setChildSkip(true);}}/>:<>
       {page==="start"&&isFamily(role)&&<ParentStartPage role={role} currentUser={user} events={rsvpEvents} myKids={myKids} rsvps={rsvps} openRsvps={openRsvps} onNavigate={setPage}/>}

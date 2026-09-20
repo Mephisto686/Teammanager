@@ -40,10 +40,6 @@ service cloud.firestore {
     function isGroupAdmin(groupId) {
       return isGlobalAdmin() || (isGroupMember(groupId) && groupRole(groupId) == "admin");
     }
-    // Offener Beitritt: Eltern/Spieler dürfen auch ohne Code beitreten (Standard; Admin kann das im Team ausschalten: openJoin=false)
-    function groupOpen(groupId) {
-      return get(/databases/$(database)/documents/groups/$(groupId)).data.get('openJoin', true) != false;
-    }
     // Gültiger Einladungscode dieses Teams (wird im Mitgliedsdokument als "joinCode" mitgeschickt).
     // Der Code muss existieren (erneuerte Codes werden gelöscht) und darf nicht abgelaufen sein (expiresAtMs, leer = unbegrenzt).
     function validJoinCode(groupId) {
@@ -78,7 +74,7 @@ service cloud.firestore {
       match /members/{uid} {
         allow read: if isGlobalAdmin() || canWriteGroup(groupId) || (isSignedIn() && request.auth.uid == uid);
         // Selbstbeitritt nur mit den Rollen "eltern" und/oder "spieler" (Feld "roles"), nur mit diesen Feldern
-        // und nur in offenen Teams oder mit gültigem Einladungscode. Trainer/Admin gibt es nur durch Bestätigung eines Admins.
+        // und nur mit gültigem, nicht abgelaufenem Einladungscode. Trainer/Admin gibt es nur durch Bestätigung eines Admins.
         // Verknüpfte Kinder ("childIds") setzen nur Trainer/Admin bzw. die Cloud Function "claimChildren".
         // Der Ersteller eines neuen Teams legt sich selbst als "admin" an.
         allow create: if isGlobalAdmin() ||
@@ -86,7 +82,7 @@ service cloud.firestore {
             && request.resource.data.role in ["eltern","spieler"]
             && request.resource.data.keys().hasOnly(["uid","role","roles","name","email","photo","joinedAt","joinCode"])
             && (!('roles' in request.resource.data) || request.resource.data.roles.hasOnly(["eltern","spieler"]))
-            && (groupOpen(groupId) || validJoinCode(groupId))) ||
+            && validJoinCode(groupId)) ||
           (isSignedIn() && request.auth.uid == uid && request.resource.data.role == "admin" && isGroupCreator(groupId)) ||
           isGroupAdmin(groupId);
         // Rollen ("role", "roles") ändern nur Admins. Trainer dürfen ausschließlich die Verknüpfung mit
