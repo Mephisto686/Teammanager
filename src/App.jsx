@@ -62,9 +62,17 @@ async function fbReadGroup(groupId, col) {
 }
 async function fbWriteGroup(groupId, col, items) {
   if(!fbDb) return;
+  let bytes = 0;
+  try { bytes = new Blob([JSON.stringify(items)]).size; } catch(e) {}
   try {
     await setDoc(doc(fbDb,"groups",groupId,"shared",col),{items, updatedAt: new Date().toISOString()});
-  } catch(e) { console.warn("fbWriteGroup",col,e); }
+    // Firestore erlaubt max. 1 MiB je Dokument: frühzeitig warnen
+    if(bytes > 900*1024) window.dispatchEvent(new CustomEvent("cloud-write-warn",{detail:{col,bytes}}));
+  } catch(e) {
+    console.warn("fbWriteGroup",col,e);
+    // Bisher still ignoriert: jetzt melden, damit nichts unbemerkt nur lokal gespeichert wird
+    try{ window.dispatchEvent(new CustomEvent("cloud-write-error",{detail:{col,bytes,code:e.code||e.message||"unbekannt"}})); }catch(_){}
+  }
 }
 
 // Einmalige Migration: legt die erste Gruppe an, kopiert bestehende shared/*-Daten
@@ -524,7 +532,7 @@ const LOG_CATS = {
   turniere:  {label:"Turniere",         icon:"🏆", tier:"coach"},
   kasse:     {label:"Kasse",            icon:"💰", tier:"coach"},
   spieler:   {label:"Spieler & Trainer",icon:"👥", tier:"coach"},
-  bibliothek:{label:"Bibliothek",       icon:"📚", tier:"coach"},
+  bibliothek:{label:"Übungen",          icon:"📚", tier:"coach"},
   todos:     {label:"To-Dos",           icon:"📝", tier:"coach"},
   treffen:   {label:"Trainertreffen",   icon:"🧑‍🏫", tier:"coach"},
   team:      {label:"Team",             icon:"🏟", tier:"coach"},
@@ -726,7 +734,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.39.2";
+const APP_VERSION = "3.41.0";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -1510,7 +1518,7 @@ ${PDF_SCRIPT}</body></html>`;
   });
   const allTags=[...new Set(exercises.flatMap(e=>e.tags||[]))].sort();
   return(<div>
-    <PageHeader title="Übungsbibliothek" sub={`${exercises.length} Übungen`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
+    <PageHeader title="Übungen" sub={`${exercises.length} Übungen`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
     <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
       {selMode
         ?<><Btn sm variant="secondary" onClick={()=>setSelIds(filtered.map(e=>e.id))}>Alle</Btn>
@@ -1912,7 +1920,7 @@ function AddToSessionModal({playerIds,sessions,players,onSaveSession,onClose,toa
   </div>);
 }
 
-function TeamPage({players,coaches,sessions,onSaveSession,onSavePlayer,onDeletePlayer,onSaveCoach,onDeleteCoach,toast,onAddToTraining,showStrength=true,readOnly=false,onlineUsers,currentUser,onGoHome,onGoBack}) {
+function TeamPage({teamsetCount=0,onOpenTeamsets,players,coaches,sessions,onSaveSession,onSavePlayer,onDeletePlayer,onSaveCoach,onDeleteCoach,toast,onAddToTraining,showStrength=true,readOnly=false,onlineUsers,currentUser,onGoHome,onGoBack}) {
   const [tab,setTab]=useState("players");
   const [modal,setModal]=useState(null);
   const [del,setDel]=useState(null);
@@ -1955,6 +1963,7 @@ function TeamPage({players,coaches,sessions,onSaveSession,onSavePlayer,onDeleteP
       {tab==="players"&&<><Btn onClick={()=>playerImportRef.current.click()} variant="secondary" sm><Upload size={14}/> Spieler importieren</Btn><input ref={playerImportRef} type="file" accept=".json,.csv" onChange={async e=>{const f=e.target.files?.[0];if(!f)return;if(f.name.endsWith(".csv")){const p=parseCsvPlayers(await readText(f));p.forEach(x=>onSavePlayer(x));toast(`${p.length} Spieler importiert`);} else handleImportPlayers(e); e.target.value="";}} style={{display:"none"}}/></>}
       {tab==="coaches"&&<><Btn onClick={()=>coachImportRef.current.click()} variant="secondary" sm><Upload size={14}/> Trainer importieren</Btn><input ref={coachImportRef} type="file" accept=".json" onChange={handleImportCoaches} style={{display:"none"}}/></>}
       {(tab==="players"||tab==="coaches")&&<Btn onClick={()=>setModal({type:tab==="players"?"pf":"cf",data:null})}><Plus size={16}/> {tab==="players"?"Spieler":"Trainer"} hinzufügen</Btn>}
+      {onOpenTeamsets&&<Btn variant="secondary" sm onClick={onOpenTeamsets}>🔀 Aufstellungen ({teamsetCount})</Btn>}
     </div>
     <div style={{display:"flex",gap:4,background:"#f1f5f9",borderRadius:10,padding:4,marginBottom:12,width:"fit-content"}}>{tb("players","Spieler",players.length)}{tb("coaches","Trainer",coaches.length)}{tb("kontakte","Kontakte",players.filter(p=>(p.contacts||[]).length>0).length)}</div>
     {totalSel>0&&<div style={{borderRadius:10,border:`1.5px solid ${C.primary}`,background:C.accentL,padding:"10px 14px",marginBottom:12}}>
@@ -2172,7 +2181,7 @@ function NotfallModal({exercises,onClose}) {
       <div><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:.6}}>Zeit übrig</label><div style={{display:"flex",gap:6}}>{[5,10,15,20].map(m=><button key={m} onClick={()=>setMinutes(m)} style={{flex:1,padding:"9px 4px",borderRadius:8,border:`2px solid ${minutes===m?"#dc2626":C.border}`,background:minutes===m?"#fee2e2":"white",color:minutes===m?"#dc2626":C.muted,cursor:"pointer",fontWeight:800,fontSize:14,fontFamily:"inherit"}}>{m}'</button>)}</div></div>
     </div>
     <div style={{marginBottom:16}}><label style={{display:"block",fontSize:12,fontWeight:700,color:C.muted,marginBottom:8,textTransform:"uppercase",letterSpacing:.6}}>Verfügbares Material (optional)</label><div style={{display:"flex",flexWrap:"wrap",gap:6}}>{PMAT.map(m=><button key={m} onClick={()=>toggleMat(m)} style={{padding:"4px 12px",borderRadius:20,border:`1.5px solid ${mat.includes(m)?C.primary:C.border}`,background:mat.includes(m)?C.accentL:"white",color:mat.includes(m)?C.primary:C.muted,cursor:"pointer",fontSize:12,fontWeight:600,fontFamily:"inherit"}}>{m}</button>)}</div></div>
-    {exercises.length===0&&<div style={{background:"#fffbeb",borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:13,color:"#92400e",border:"1px solid #fde68a"}}>⚠️ Noch keine Übungen in der Bibliothek.</div>}
+    {exercises.length===0&&<div style={{background:"#fffbeb",borderRadius:8,padding:"10px 14px",marginBottom:12,fontSize:13,color:"#92400e",border:"1px solid #fde68a"}}>⚠️ Noch keine Übungen vorhanden.</div>}
     <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}><Btn onClick={onClose} variant="secondary">Abbrechen</Btn><Btn onClick={find} style={{background:"#dc2626",color:"white"}} disabled={exercises.length===0}><AlertTriangle size={14}/> Alternativen finden</Btn></div>
   </div>);
 }
@@ -2584,7 +2593,7 @@ function TeamplanerPage({players,teamsets,onSaveTeamset,onDeleteTeamset,toast,re
   }
 
   return(<div>
-    <PageHeader title="Teams" sub={`${sorted.length} gespeicherte Aufstellungen`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
+    <PageHeader title="Aufstellungen" sub={`${sorted.length} gespeicherte Teamaufteilungen`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
     {!readOnly&&onSaveTeamset&&<div style={{marginBottom:16}}><Btn onClick={openNew}><Plus size={15}/> Neue Aufstellung</Btn></div>}
 
     {sorted.length===0&&<div style={{textAlign:"center",padding:"60px 20px",color:C.muted}}>
@@ -3553,7 +3562,7 @@ function NewTrainingWizard({sessions,players,exercises,rsvps={},initialSetup,ini
           </div>
         </div>);
       })}
-      {sortedEx.length===0&&<span style={{color:C.muted,fontSize:13}}>Noch keine Übungen in der Bibliothek</span>}
+      {sortedEx.length===0&&<span style={{color:C.muted,fontSize:13}}>Noch keine Übungen vorhanden</span>}
     </div>}
 
     <div style={{borderTop:`1px solid ${C.border}`,marginTop:18,paddingTop:16,display:"flex",gap:8,flexWrap:"nowrap"}}>
@@ -4998,7 +5007,7 @@ function SettingsPage({exercises,players,coaches,sessions,tournaments,kassenbuch
     </div>}/>
     <Sec title="📤 Exportieren" ch={<div style={{display:"flex",flexDirection:"column",gap:10}}>
       <EC icon="💾" title="Vollständiges Backup" desc="Alle Daten inkl. Turniere & Kasse" sub={`${exercises.length} Übungen · ${players.length} Spieler · ${sessions.length} Trainings · ${tournaments.length} Turniere · ${kassenbuch.length} Kassenbucheinträge`} fn={onFullBackup}/>
-      <EC icon="📚" title="Nur Übungen" desc="Bibliothek teilen" sub={`${exercises.length} Übungen`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"exercises",exercises},`Teammanager_Uebungen_${exercises.length}-Eintraege_${todayISO()}.json`,toast)}/>
+      <EC icon="📚" title="Nur Übungen" desc="Übungen teilen" sub={`${exercises.length} Übungen`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"exercises",exercises},`Teammanager_Uebungen_${exercises.length}-Eintraege_${todayISO()}.json`,toast)}/>
       <EC icon="👥" title="Team" desc="Spieler & Trainer" sub={`${players.length} Spieler · ${coaches.length} Trainer`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"team",players,coaches},`Teammanager_Team_${players.length}-Spieler_${todayISO()}.json`,toast)}/>
       <EC icon="📊" title="Spieler (CSV)" desc="Für Excel & Google Sheets" sub={`${players.length} Spieler`} fn={async()=>dlCsv(players,["name","birthYear","strength","active","jersey","notes"],`Teammanager_Spieler_${todayISO()}.csv`,toast)}/>
       <EC icon="📅" title="Training" desc="Alle Trainingseinheiten" sub={`${sessions.length} Einheiten`} fn={async()=>dlJson({version:APP_VERSION,exportDate:new Date().toISOString(),type:"sessions",sessions},`Teammanager_Training_${sessions.length}-Einheiten_${todayISO()}.json`,toast)}/>
@@ -5566,16 +5575,15 @@ function Nav({page,setPage,counts,onLogout}) {
   const allItems=[
     {key:"start",    icon:Home,      label:"Start"},
     {key:"calendar", icon:Clock,     label:"Termine",alert:isFamily(counts.role)&&counts.openRsvps>0},
-    {key:"library",  icon:BookOpen,  label:"Bibliothek", count:counts.exercises},
+    {key:"library",  icon:BookOpen,  label:"Übungen", count:counts.exercises},
     {key:"team",     icon:Users,     label:"Team",        count:counts.players},
-    {key:"teamplaner",icon:Shuffle,  label:"Teams",       count:counts.teamsets},
     {key:"kasse",    icon:Wallet,    label:"Kasse"},
     {key:"orga",     icon:ClipboardList,label:"To Dos",count:counts.openTodos},
     {key:"log",      icon:ListChecks,label:"Aktivität"},
     {key:"settings", icon:Settings,  label:"Einstellungen",alert:counts.pendingCount>0},
   ];
   const visible=allItems.filter(i=>can(counts.role,i.key)||(i.key==="settings"&&(counts.role==="trainer"||isFamily(counts.role))));
-  const MAIN_KEYS=isFamily(counts.role)?["start","calendar","log","settings"]:["start","calendar","library","teamplaner"];
+  const MAIN_KEYS=isFamily(counts.role)?["start","calendar","log","settings"]:["start","calendar","team","orga"];
   const mainItems=visible.filter(i=>MAIN_KEYS.includes(i.key));
   const moreItems=visible.filter(i=>!MAIN_KEYS.includes(i.key));
   const moreActive=moreItems.some(i=>i.key===page);
@@ -5584,14 +5592,14 @@ function Nav({page,setPage,counts,onLogout}) {
   // Gruppierung für das Hamburger-Menü (volle Übersicht aller Bereiche)
   const MENU_GROUPS=[
     {label:null,        keys:["start","calendar"]},
-    {label:"Training",  keys:["library","teamplaner"]},
+    {label:"Training",  keys:["library"]},
     {label:"Mannschaft",keys:["team"]},
     {label:"Verwaltung",keys:["kasse","orga"]},
     {label:"Sonstiges", keys:["log","settings"]},
   ];
 
   const navBtn=(item)=>{
-    const active=page===item.key||(item.key==="calendar"&&page==="turnier");
+    const active=page===item.key||(item.key==="calendar"&&page==="turnier")||(item.key==="team"&&page==="teamplaner");
     const Icon=item.icon;
     return(<button key={item.key} onClick={()=>{setPage(item.key);setMenuOpen(false);}} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4,padding:"10px 4px",border:"none",cursor:"pointer",background:"transparent",color:active?"#4ade80":"rgba(255,255,255,.5)",fontFamily:"inherit",position:"relative"}}>
       <Icon size={22} strokeWidth={active?2.5:1.8}/>
@@ -5609,7 +5617,7 @@ function Nav({page,setPage,counts,onLogout}) {
         <div style={{fontSize:18,fontWeight:900,color:"white",marginTop:2}}>⚽ Manager</div>
         <div style={{fontSize:10,color:"rgba(255,255,255,.3)",marginTop:2}}>v{APP_VERSION}</div>
       </div>
-      {visible.map(({key,icon:Icon,label,count})=><button key={key} onClick={()=>setPage(key)} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:10,border:"none",cursor:"pointer",marginBottom:4,width:"100%",textAlign:"left",fontFamily:"inherit",background:page===key?"rgba(34,197,94,.2)":"transparent",color:page===key?"#4ade80":"rgba(255,255,255,.6)"}}><Icon size={18} strokeWidth={page===key?2.5:1.8}/><span style={{fontSize:14,fontWeight:700,flex:1}}>{label}</span>{count!==undefined&&<span style={{fontSize:11,background:"rgba(255,255,255,.1)",borderRadius:20,padding:"1px 7px",color:"rgba(255,255,255,.5)"}}>{count}</span>}</button>)}
+      {visible.map(({key,icon:Icon,label,count})=>{const on=page===key||(key==="calendar"&&page==="turnier")||(key==="team"&&page==="teamplaner");return <button key={key} onClick={()=>setPage(key)} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:10,border:"none",cursor:"pointer",marginBottom:4,width:"100%",textAlign:"left",fontFamily:"inherit",background:on?"rgba(34,197,94,.2)":"transparent",color:on?"#4ade80":"rgba(255,255,255,.6)"}}><Icon size={18} strokeWidth={on?2.5:1.8}/><span style={{fontSize:14,fontWeight:700,flex:1}}>{label}</span>{count!==undefined&&<span style={{fontSize:11,background:"rgba(255,255,255,.1)",borderRadius:20,padding:"1px 7px",color:"rgba(255,255,255,.5)"}}>{count}</span>}</button>;})}
       {onLogout&&<button onClick={askLogout} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:10,border:"none",cursor:"pointer",marginTop:"auto",width:"100%",textAlign:"left",fontFamily:"inherit",background:"transparent",color:"rgba(255,255,255,.6)"}}><span style={{fontSize:16}}>🔓</span><span style={{fontSize:14,fontWeight:700}}>Abmelden</span></button>}
     </div>
     {/* Mobile bottom nav */}
@@ -5640,7 +5648,7 @@ function Nav({page,setPage,counts,onLogout}) {
           return(<div key={gi}>
             {g.label&&<div style={{fontSize:11,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:1,padding:"14px 10px 6px"}}>{g.label}</div>}
             {items.map(({key,icon:Icon,label,count,alert})=>{
-              const active=page===key||(key==="calendar"&&page==="turnier");
+              const active=page===key||(key==="calendar"&&page==="turnier")||(key==="team"&&page==="teamplaner");
               return(<button key={key} onClick={()=>{setPage(key);setMenuOpen(false);}} style={{display:"flex",alignItems:"center",gap:12,width:"100%",padding:"11px 10px",borderRadius:10,border:"none",cursor:"pointer",fontFamily:"inherit",textAlign:"left",background:active?C.accentL:"transparent",color:active?C.primary:C.text,position:"relative",marginBottom:2}}>
                 <Icon size={19} strokeWidth={active?2.5:1.8}/>
                 {alert&&<span style={{position:"absolute",top:8,left:30,background:"#ef4444",width:7,height:7,borderRadius:"50%"}}/>}
@@ -5997,6 +6005,51 @@ function useFirebaseAuth() {
 // ── FIREBASE SYNC HOOK ────────────────────────────────────────────
 // Syncs a named collection to/from Firestore in real-time.
 // Falls back to local Dexie when offline or not logged in.
+// ── GROSSE SAMMLUNGEN AUF MEHRERE DOKUMENTE VERTEILEN ─────────────
+// Firestore erlaubt höchstens 1 MiB je Dokument. Übungen mit eingebetteten Skizzen (Base64) sprengen das schnell –
+// das Speichern in der Cloud schlug dann fehl und die Übungen lagen nur lokal im Browser. Deshalb wird "exercises"
+// in Teile zerlegt: shared/exercises (Teil 1 + Anzahl "parts"), shared/exercises__p2, __p3 …
+const CHUNKED_KEYS = new Set(["exercises"]);
+const CHUNK_MAX_BYTES = 700*1024;
+const bytesOf = x => new TextEncoder().encode(JSON.stringify(x)).length;
+function splitIntoChunks(items, maxBytes=CHUNK_MAX_BYTES) {
+  const chunks=[]; let cur=[]; let curBytes=2;
+  for(const it of items){
+    const b=bytesOf(it)+1;
+    if(cur.length && curBytes+b>maxBytes){ chunks.push(cur); cur=[]; curBytes=2; }
+    cur.push(it); curBytes+=b;
+  }
+  chunks.push(cur); // immer mindestens ein (ggf. leerer) Teil
+  return chunks;
+}
+// Schreibt alle Teile: erst die Zusatzdokumente, zuletzt das Hauptdokument (mit Anzahl der Teile); überzählige alte Teile werden gelöscht
+async function fbWriteGroupChunked(groupId, col, items, prevParts=1) {
+  if(!fbDb) return 1;
+  const chunks=splitIntoChunks(items), now=new Date().toISOString();
+  const biggest=Math.max(...chunks.map(c=>bytesOf(c)));
+  if(biggest>950*1024) window.dispatchEvent(new CustomEvent("cloud-write-warn",{detail:{col,bytes:biggest}}));
+  try{
+    for(let i=1;i<chunks.length;i++) await setDoc(doc(fbDb,"groups",groupId,"shared",`${col}__p${i+1}`),{items:chunks[i],updatedAt:now});
+    await setDoc(doc(fbDb,"groups",groupId,"shared",col),{items:chunks[0],parts:chunks.length,updatedAt:now});
+    for(let i=chunks.length+1;i<=prevParts;i++){ try{ await deleteDoc(doc(fbDb,"groups",groupId,"shared",`${col}__p${i}`)); }catch(e){} }
+  }catch(e){
+    console.warn("fbWriteGroupChunked",col,e);
+    try{ window.dispatchEvent(new CustomEvent("cloud-write-error",{detail:{col,bytes:biggest,code:e.code||e.message||"unbekannt"}})); }catch(_){}
+    return prevParts;
+  }
+  return chunks.length;
+}
+// Liest Teil 1 (aus dem Hauptdokument) und alle weiteren Teile
+async function readChunkParts(groupId, col, baseData) {
+  let items=Array.isArray(baseData.items)?[...baseData.items]:[];
+  const parts=baseData.parts||1;
+  for(let i=2;i<=parts;i++){
+    const r=await getDoc(doc(fbDb,"groups",groupId,"shared",`${col}__p${i}`));
+    if(r.exists()&&Array.isArray(r.data().items)) items=items.concat(r.data().items);
+  }
+  return items;
+}
+
 // Lokaler Cache-Schlüssel pro Team (das Standard-Team behält den alten Schlüssel, damit dessen Cache erhalten bleibt)
 const cloudCacheKey = (groupId, key) => groupId===DEFAULT_GROUP_ID ? "cloud_"+key : `cloud_${groupId}_${key}`;
 function useCloudStorage(key, def, user, groupId=DEFAULT_GROUP_ID) {
@@ -6007,6 +6060,7 @@ function useCloudStorage(key, def, user, groupId=DEFAULT_GROUP_ID) {
   const data  = fresh ? store.data : def;
   const ready = fresh ? store.ready : false;
   const patch = fn => setStore(st => fn(st.k===localKey ? st : {k:localKey, data:def, ready:false, fromCloud:false}));
+  const partsRef = useRef(1); // Anzahl der Firestore-Teile (nur für zerlegte Sammlungen)
 
   // Load from local cache first (instant) – aber nie über frischere Cloud-Daten drüberschreiben
   useEffect(() => {
@@ -6022,12 +6076,20 @@ function useCloudStorage(key, def, user, groupId=DEFAULT_GROUP_ID) {
   useEffect(() => {
     if (!user || !groupId) return;
     if(!fbDb) return;
-    const unsub = onSnapshot(doc(fbDb, "groups", groupId, "shared", key), snap => {
-      if (snap.exists()) {
-        const items = snap.data().items;
-        patch(b => ({...b, data:items, fromCloud:true}));
-        db.kv.put({ key: localKey, value: JSON.stringify(items) }).catch(() => {});
+    let seq=0;
+    const unsub = onSnapshot(doc(fbDb, "groups", groupId, "shared", key), async snap => {
+      if (!snap.exists()) return;
+      const d = snap.data();
+      let items = d.items;
+      if (CHUNKED_KEYS.has(key)) {
+        if (snap.metadata.hasPendingWrites) return; // eigene Schreibvorgänge sind lokal schon übernommen
+        partsRef.current = d.parts || 1;
+        const mine = ++seq;
+        try { items = await readChunkParts(groupId, key, d); } catch(e) { console.warn("Teile lesen", key, e); return; }
+        if (mine !== seq) return; // neuerer Stand ist schon unterwegs
       }
+      patch(b => ({...b, data:items, fromCloud:true}));
+      db.kv.put({ key: localKey, value: JSON.stringify(items) }).catch(() => {});
     }, e => console.warn("onSnapshot", key, e));
     return unsub;
   }, [user, groupId, key, localKey]); // eslint-disable-line
@@ -6041,7 +6103,10 @@ function useCloudStorage(key, def, user, groupId=DEFAULT_GROUP_ID) {
       // Write locally
       db.kv.put({ key: localKey, value: JSON.stringify(next) }).catch(() => {});
       // Write to cloud if logged in
-      if (user && groupId) fbWriteGroup(groupId, key, next);
+      if (user && groupId) {
+        if (CHUNKED_KEYS.has(key)) fbWriteGroupChunked(groupId, key, next, partsRef.current).then(n=>{ partsRef.current=n; });
+        else fbWriteGroup(groupId, key, next);
+      }
       return {...base, data:next};
     });
   }, [user, groupId, key, localKey]); // eslint-disable-line
@@ -6492,6 +6557,16 @@ export default function App() {
     Object.assign(CATS,merged);
   },[customCats]);
   const {toast,Toasts}=useToast();
+  // Speichern in der Cloud fehlgeschlagen (z. B. Dokument zu groß / keine Berechtigung): sichtbar melden statt still zu ignorieren
+  useEffect(()=>{
+    const names={exercises:"Übungen",players:"Spieler",coaches:"Trainer",sessions:"Trainings",tournaments:"Turniere",kassenbuch:"Kassenbuch",todos:"To-Dos",meetings:"Trainertreffen",recurringSlots:"Trainingszeiten",teamsets:"Mannschaften",customCats:"Kategorien"};
+    const seen={};
+    const throttle=k=>{const n=Date.now();if(seen[k]&&n-seen[k]<30000)return false;seen[k]=n;return true;};
+    const onErr=e=>{const{col,bytes,code}=e.detail||{};if(!throttle("e"+col))return;const mb=bytes?` (${(bytes/1048576).toFixed(2)} MB)`:"";toast(`⚠️ ${names[col]||col} konnten NICHT in der Cloud gespeichert werden${mb}: ${code}. Bitte ein Backup erstellen (Einstellungen).`,"err");};
+    const onWarn=e=>{const{col,bytes}=e.detail||{};if(!throttle("w"+col))return;toast(`⚠️ ${names[col]||col} sind fast zu groß für die Cloud (${(bytes/1048576).toFixed(2)} MB von 1 MB). Bitte große Skizzen/Bilder reduzieren oder ein Backup erstellen.`,"warn");};
+    window.addEventListener("cloud-write-error",onErr); window.addEventListener("cloud-write-warn",onWarn);
+    return ()=>{window.removeEventListener("cloud-write-error",onErr);window.removeEventListener("cloud-write-warn",onWarn);};
+  },[]); // eslint-disable-line
   // Einladungslink/-code, der vor der Anmeldung gemerkt wurde: nach dem Login automatisch beitreten
   useEffect(()=>{
     if(!user||memberships===null) return;
@@ -6595,7 +6670,7 @@ export default function App() {
       {page==="start"&&isFamily(role)&&<ParentStartPage role={role} currentUser={user} events={rsvpEvents} myKids={myKids} rsvps={rsvps} eventMeta={eventMeta} openRsvps={openRsvps} onNavigate={setPage} onSetRsvp={setRsvp} toast={toast}/>}
       {page==="start"&&!isFamily(role)&&<StartPage players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} todos={todos} meetings={meetings} teamsets={teamsets} kassenbuch={kassenbuch} exercises={exercises} role={role} openRsvps={openRsvps} currentUser={user} onlineUsers={onlineUsers} onNavigate={setPage} onOpenLibraryCategory={cat=>{setPendingLibraryCat(cat);setPage("library");}} onOpenOrgaItem={target=>{setPendingOrgaTarget(target);setPage("orga");}} onOpenCalendarItem={target=>{setPendingCalendarTarget(target);setPage("calendar");}} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} onSaveExercise={saveEx} onDeleteExercise={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="library"  &&<LibraryPage  exercises={exercises} onSave={saveEx} onDelete={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} apiKey={apiKey} toast={toast} onlineUsers={onlineUsers} currentUser={user} initialCategory={pendingLibraryCat} onConsumeInitialCategory={()=>setPendingLibraryCat(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
-      {page==="team"     &&<TeamPage     players={players} coaches={coaches} sessions={sessions} onSaveSession={saveSe} onSavePlayer={can(role,"editAnything")?savePl:null} onDeletePlayer={can(role,"editAnything")?id=>{const i=players.find(p=>p.id===id);setPlayers(prev=>prev.filter(p=>p.id!==id));showUndo("Spieler",i,()=>setPlayers(prev=>[i,...prev]));}:null} onSaveCoach={can(role,"editAnything")?saveCo:null} onDeleteCoach={can(role,"editAnything")?id=>{const i=coaches.find(c=>c.id===id);setCoaches(prev=>prev.filter(c=>c.id!==id));showUndo("Trainer",i,()=>setCoaches(prev=>[i,...prev]));}:null} toast={toast} showStrength={can(role,"seeStrength")} readOnly={!can(role,"editAnything")} onAddToTraining={can(role,"editAnything")?({playerIds,coachIds,kids,coachCount})=>{setPendingSetup({playerIds,coachIds,kids:kids||playerIds.length,coachCount:coachCount||1,date:todayISO(),location:"outdoor",focus:""});setPage("training");}:null} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="team"     &&<TeamPage     teamsetCount={teamsets.length} onOpenTeamsets={can(role,"teamplaner")?()=>setPage("teamplaner"):null} players={players} coaches={coaches} sessions={sessions} onSaveSession={saveSe} onSavePlayer={can(role,"editAnything")?savePl:null} onDeletePlayer={can(role,"editAnything")?id=>{const i=players.find(p=>p.id===id);setPlayers(prev=>prev.filter(p=>p.id!==id));showUndo("Spieler",i,()=>setPlayers(prev=>[i,...prev]));}:null} onSaveCoach={can(role,"editAnything")?saveCo:null} onDeleteCoach={can(role,"editAnything")?id=>{const i=coaches.find(c=>c.id===id);setCoaches(prev=>prev.filter(c=>c.id!==id));showUndo("Trainer",i,()=>setCoaches(prev=>[i,...prev]));}:null} toast={toast} showStrength={can(role,"seeStrength")} readOnly={!can(role,"editAnything")} onAddToTraining={can(role,"editAnything")?({playerIds,coachIds,kids,coachCount})=>{setPendingSetup({playerIds,coachIds,kids:kids||playerIds.length,coachCount:coachCount||1,date:todayISO(),location:"outdoor",focus:""});setPage("training");}:null} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="orga"&&can(role,"orga")&&<OrgaPage todos={todos} onSaveTodo={saveTodo} onDeleteTodo={id=>{const i=todos.find(t=>t.id===id);setTodos(prev=>prev.filter(t=>t.id!==id));showUndo("Task",i,()=>setTodos(prev=>[i,...prev]));}} coaches={coaches} currentUser={user} toast={toast} showUndo={showUndo} readOnly={!can(role,"editAnything")} onlineUsers={onlineUsers} pendingTarget={pendingOrgaTarget} onClearPendingTarget={()=>setPendingOrgaTarget(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="teamplaner"&&<TeamplanerPage players={players} teamsets={teamsets} onSaveTeamset={can(role,"editAnything")?saveTSets:null} onDeleteTeamset={can(role,"editAnything")?id=>{const i=teamsets.find(t=>t.id===id);setTeamsets(prev=>prev.filter(t=>t.id!==id));showUndo("Team-Aufstellung",i,()=>setTeamsets(prev=>[i,...prev]));}:null} readOnly={!can(role,"editAnything")} showStrength={can(role,"seeStrength")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="turnier"  &&<TurnierPage  tournaments={tournaments} onSaveTournament={saveTo} onDeleteTournament={id=>{const i=tournaments.find(t=>t.id===id);setTournaments(prev=>prev.filter(t=>t.id!==id));showUndo("Turnier",i,()=>setTournaments(prev=>[i,...prev]));}} coaches={coaches} players={players} onSavePlayer={can(role,"editAnything")?savePl:null} onlineUsers={onlineUsers} currentUser={user} toast={toast} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null} initialOpenId={pendingTurnierId} onClearInitialOpen={()=>setPendingTurnierId(null)}/>}
