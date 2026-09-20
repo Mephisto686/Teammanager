@@ -398,24 +398,16 @@ function usePersonalSettings(userId) {
 const RoleSwitchCtx = React.createContext(null);
 function RoleSwitcher() {
   const ctx = React.useContext(RoleSwitchCtx);
-  const [open,setOpen] = useState(false);
   if(!ctx || !ctx.views || ctx.views.length<2) return null;
   const cur = USER_ROLES[ctx.viewRole] || USER_ROLES.eltern;
-  return(<div style={{position:"relative",flexShrink:0}}>
-    <button onClick={()=>setOpen(o=>!o)} title="Ansicht wechseln" style={{display:"flex",alignItems:"center",gap:4,padding:"5px 10px",borderRadius:20,border:`1.5px solid ${cur.color}`,background:cur.bg,color:cur.color,fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}}>{cur.emoji} {cur.label} ▾</button>
-    {open&&<>
-      <div style={{position:"fixed",inset:0,zIndex:9990}} onClick={()=>setOpen(false)}/>
-      <div style={{position:"absolute",top:36,right:0,background:C.card,border:`1px solid ${C.border}`,borderRadius:12,boxShadow:"0 4px 20px rgba(0,0,0,.18)",padding:"6px",minWidth:170,zIndex:9991}}>
-        <div style={{fontSize:10,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,padding:"4px 8px 6px"}}>Ansicht wechseln</div>
-        {ctx.views.map(v=>{
-          const r=USER_ROLES[v]; const active=v===ctx.viewRole;
-          return(<button key={v} onClick={()=>{ctx.setViewRole(v);setOpen(false);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"9px 10px",borderRadius:8,border:"none",background:active?r.bg:"transparent",color:active?r.color:C.text,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit",textAlign:"left"}}>
-            <span>{r.emoji}</span><span style={{flex:1}}>{r.label}</span>{active&&<span>✓</span>}
-          </button>);
-        })}
-      </div>
-    </>}
-  </div>);
+  // Ein Tipp wechselt reihum in die nächste Ansicht (Admin → Trainer → Eltern → Admin …)
+  const idx = ctx.views.indexOf(ctx.viewRole);
+  const next = ctx.views[(idx+1)%ctx.views.length];
+  const nextRole = USER_ROLES[next] || USER_ROLES.eltern;
+  return(<button onClick={()=>ctx.setViewRole(next)} title={`Ansicht wechseln zu: ${nextRole.label}`}
+    style={{display:"flex",alignItems:"center",gap:5,padding:"5px 10px",borderRadius:20,border:`1.5px solid ${cur.color}`,background:cur.bg,color:cur.color,fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap",flexShrink:0}}>
+    {cur.emoji} {cur.label} <span style={{opacity:.7}}>⇄</span>
+  </button>);
 }
 
 // ── ANMELDUNG: Daten & Hooks ──────────────────────────────────────
@@ -494,7 +486,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.26.0";
+const APP_VERSION = "3.27.2";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -2863,7 +2855,9 @@ function MeetingForm({m,onSave,onClose}) {
 // ── KALENDER (vereinheitlichte Terminübersicht) ─────────────────
 function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,onSaveSession,onDeleteSession,onSavePlayer,onSaveMeeting,onDeleteMeeting,onSaveTournament,onSaveExercise,apiKey,toast,readOnly,onOpenTournament,pendingTarget,onClearPendingTarget,onlineUsers,currentUser,onGoHome,onGoBack}) {
   const todayStr=todayISO();
-  const [types,setTypes]=useState({training:true,spieltag:true,treffen:true});
+  // Typ-Filter: Klick auf einen Typ zeigt NUR diesen Typ; erneuter Klick (oder "Alle") zeigt wieder alles
+  const [typeFilter,setTypeFilter]=useState("all"); // all | training | spieltag | treffen
+  const types={training:typeFilter==="all"||typeFilter==="training",spieltag:typeFilter==="all"||typeFilter==="spieltag",treffen:typeFilter==="all"||typeFilter==="treffen"};
   const [view,setView]=useState("list"); // list | month
   const [showFuture,setShowFuture]=useState(true);
   const [showPast,setShowPast]=useState(false);
@@ -2918,7 +2912,7 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
   const selectedDayItems=(itemsByDate[selectedDay]||[]).slice().sort((a,b)=>a.date.localeCompare(b.date));
 
   const typeChip=(key,label,emoji)=>(
-    <button onClick={()=>setTypes(t=>({...t,[key]:!t[key]}))} style={{padding:"6px 14px",borderRadius:20,border:`1.5px solid ${types[key]?C.primary:C.border}`,background:types[key]?C.accentL:"white",color:types[key]?C.primary:C.muted,cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>{emoji} {label}</button>
+    <button onClick={()=>setTypeFilter(typeFilter===key?"all":key)} style={{padding:"6px 14px",borderRadius:20,border:`1.5px solid ${typeFilter===key?C.primary:C.border}`,background:typeFilter===key?C.accentL:"white",color:typeFilter===key?C.primary:C.muted,cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>{emoji} {label}</button>
   );
 
   const sectionHeader=(label,open,setOpen,count)=>(
@@ -2983,6 +2977,7 @@ function CalendarPage({sessions,meetings,tournaments,players,coaches,exercises,o
     <PageHeader title="Termine" sub={`${items.length} Termine`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
     <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:12,alignItems:"center",justifyContent:"space-between"}}>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        <button onClick={()=>setTypeFilter("all")} style={{padding:"6px 14px",borderRadius:20,border:`1.5px solid ${typeFilter==="all"?C.primary:C.border}`,background:typeFilter==="all"?C.accentL:"white",color:typeFilter==="all"?C.primary:C.muted,cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:"inherit"}}>Alle</button>
         {typeChip("training","Training","📅")}
         {typeChip("spieltag","Spieltag","🏆")}
         {typeChip("treffen","Treffen","🧑‍🏫")}
@@ -5102,7 +5097,7 @@ function RsvpStatusPills({kids,ev,rsvps}) {
   return(<div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:8}}>
     {kids.map(k=>{
       const st=rsvps[rsvpKey(ev.key,k.id)]?.status||null;
-      const m=st==="yes"?{t:"✅ Dabei",bg:"#dcfce7",c:"#16a34a"}:st==="no"?{t:"❌ Nicht dabei",bg:"#fee2e2",c:"#dc2626"}:{t:"⏳ Offen",bg:"#fef3c7",c:"#b45309"};
+      const m=st==="yes"?{t:"✅ Dabei",bg:"#dcfce7",c:"#16a34a"}:st==="maybe"?{t:"🤔 Unsicher",bg:"#fef3c7",c:"#b45309"}:st==="no"?{t:"❌ Nicht dabei",bg:"#fee2e2",c:"#dc2626"}:{t:"⏳ Offen",bg:"#fef3c7",c:"#b45309"};
       return <span key={k.id} style={{fontSize:11,fontWeight:700,padding:"2px 10px",borderRadius:20,background:m.bg,color:m.c}}>{kids.length>1?`${k.name}: `:""}{m.t}</span>;
     })}
   </div>);
@@ -5177,16 +5172,17 @@ function RsvpEventHead({ev}) {
 function RsvpKidRow({kid,ev,rsvp,onSave,compact,showName=true}) {
   const st = rsvp?.status || null;
   const btn=(val,label,col,bg)=>(
-    <button onClick={()=>onSave(ev,kid.id,st===val?null:val,val==="no"?(rsvp?.note||""):"")} style={{flex:1,padding:compact?"6px 8px":"10px 8px",borderRadius:10,border:`2px solid ${st===val?col:C.border}`,background:st===val?bg:C.card,color:st===val?col:C.muted,fontWeight:800,fontSize:compact?12:14,cursor:"pointer",fontFamily:"inherit"}}>{label}</button>
+    <button onClick={()=>onSave(ev,kid.id,st===val?null:val,val!=="yes"?(rsvp?.note||""):"")} style={{flex:1,minWidth:0,padding:compact?"6px 2px":"10px 2px",borderRadius:10,border:`2px solid ${st===val?col:C.border}`,background:st===val?bg:C.card,color:st===val?col:C.muted,fontWeight:800,fontSize:compact?11:13,cursor:"pointer",fontFamily:"inherit"}}>{label}</button>
   );
   return(<div style={{padding:compact?"8px 0":"10px 0"}}>
     {showName&&<div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:6}}>{kid.name}</div>}
-    <div style={{display:"flex",gap:8}}>
+    <div style={{display:"flex",gap:6}}>
       {btn("yes","✅ Dabei","#16a34a","#dcfce7")}
+      {btn("maybe","🤔 Unsicher","#b45309","#fef3c7")}
       {btn("no","❌ Nicht dabei","#dc2626","#fee2e2")}
     </div>
-    {st==="no"&&<input key={rsvp?.note||""} defaultValue={rsvp?.note||""} placeholder="Grund (optional, z. B. krank)"
-      onBlur={e=>{const v=e.target.value.trim();if(v!==(rsvp?.note||""))onSave(ev,kid.id,"no",v);}}
+    {(st==="no"||st==="maybe")&&<input key={rsvp?.note||""} defaultValue={rsvp?.note||""} placeholder={st==="maybe"?"Anmerkung (optional)":"Grund (optional, z. B. krank)"}
+      onBlur={e=>{const v=e.target.value.trim();if(v!==(rsvp?.note||""))onSave(ev,kid.id,st,v);}}
       style={{width:"100%",marginTop:8,padding:"8px 10px",border:`1.5px solid ${C.border}`,borderRadius:8,fontSize:13,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit"}}/>}
   </div>);
 }
@@ -5195,6 +5191,8 @@ function RsvpPage({role,events,players,rsvps,onSetRsvp,myKids,toast,onlineUsers,
   const isParent = role==="eltern";
   const [showAll,setShowAll] = useState(false);
   const [openKey,setOpenKey] = useState(null);
+  const [statusFilter,setStatusFilter] = useState("all"); // all | yes | maybe | no | open
+  const [pinned,setPinned] = useState(()=>new Set());     // eben geänderte Spieler bleiben sichtbar, damit die Liste nicht springt
   const horizon = addDaysISO(todayISO(),RSVP_HORIZON_DAYS);
   const shown = showAll ? events : events.filter(e=>e.date<=horizon);
   const hidden = events.length - shown.length;
@@ -5221,7 +5219,7 @@ function RsvpPage({role,events,players,rsvps,onSetRsvp,myKids,toast,onlineUsers,
       {shown.length===0&&<div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted}}>Aktuell sind keine Termine geplant.</div>}
       {shown.map(ev=>{
         const open=myKids.filter(k=>!rsvps[rsvpKey(ev.key,k.id)]).length;
-        const yesL=active.filter(p=>stOf(ev,p)==="yes"), noL=active.filter(p=>stOf(ev,p)==="no"), openL=active.filter(p=>!stOf(ev,p));
+        const yesL=active.filter(p=>stOf(ev,p)==="yes"), maybeL=active.filter(p=>stOf(ev,p)==="maybe"), noL=active.filter(p=>stOf(ev,p)==="no"), openL=active.filter(p=>!stOf(ev,p));
         const isOpen=openKey===ev.key;
         return(<div key={ev.key} style={{background:C.card,borderRadius:12,border:`1.5px solid ${open>0?"#fde047":C.border}`,padding:"12px 16px",marginBottom:10}}>
           <RsvpEventHead ev={ev}/>
@@ -5230,12 +5228,14 @@ function RsvpPage({role,events,players,rsvps,onSetRsvp,myKids,toast,onlineUsers,
           </div>
           <div onClick={()=>setOpenKey(isOpen?null:ev.key)} style={{cursor:"pointer",display:"flex",gap:14,fontSize:13,fontWeight:800,marginTop:4,paddingTop:10,borderTop:`1px solid ${C.border}`}}>
             <span style={{color:"#16a34a"}}>✅ {yesL.length}</span>
+            <span style={{color:"#b45309"}}>🤔 {maybeL.length}</span>
             <span style={{color:"#dc2626"}}>❌ {noL.length}</span>
             <span style={{color:C.muted}}>⏳ {openL.length}</span>
             <span style={{marginLeft:"auto",color:C.muted,fontWeight:600,fontSize:12}}>Wer kommt? {isOpen?"▲":"▼"}</span>
           </div>
           {isOpen&&<div style={{marginTop:8,fontSize:13,color:C.text,lineHeight:1.6}}>
             {yesL.length>0&&<div><b style={{color:"#16a34a"}}>Dabei:</b> {yesL.map(p=>p.name).join(", ")}</div>}
+            {maybeL.length>0&&<div><b style={{color:"#b45309"}}>Unsicher:</b> {maybeL.map(p=>p.name).join(", ")}</div>}
             {noL.length>0&&<div><b style={{color:"#dc2626"}}>Nicht dabei:</b> {noL.map(p=>p.name).join(", ")}</div>}
             {openL.length>0&&<div><b style={{color:C.muted}}>Noch offen:</b> {openL.map(p=>p.name).join(", ")}</div>}
           </div>}
@@ -5250,27 +5250,32 @@ function RsvpPage({role,events,players,rsvps,onSetRsvp,myKids,toast,onlineUsers,
     <PageHeader title="Anmeldung" sub={`${shown.length} Termine · ${active.length} aktive Spieler`} onlineUsers={onlineUsers} currentUser={currentUser} onGoHome={onGoHome} onGoBack={onGoBack}/>
     {shown.length===0&&<div style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"20px 18px",fontSize:14,color:C.muted}}>Aktuell sind keine Termine geplant.</div>}
     {shown.map(ev=>{
-      const yes=active.filter(p=>stOf(ev,p)==="yes"), no=active.filter(p=>stOf(ev,p)==="no"), openL=active.filter(p=>!stOf(ev,p));
+      const yes=active.filter(p=>stOf(ev,p)==="yes"), maybe=active.filter(p=>stOf(ev,p)==="maybe"), no=active.filter(p=>stOf(ev,p)==="no"), openL=active.filter(p=>!stOf(ev,p));
       const isOpen=openKey===ev.key;
-      const group=(label,list)=>list.length>0&&<div style={{marginTop:10}}>
-        <div style={{fontSize:11,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6}}>{label} ({list.length})</div>
-        {list.map(p=><RsvpKidRow key={p.id} kid={p} ev={ev} rsvp={rsvps[rsvpKey(ev.key,p.id)]} onSave={save} compact/>)}
-      </div>;
+      const filters=[{k:"all",l:"Alle",n:active.length},{k:"yes",l:"✅ Dabei",n:yes.length},{k:"maybe",l:"🤔 Unsicher",n:maybe.length},{k:"no",l:"❌ Nicht dabei",n:no.length},{k:"open",l:"⏳ Keine Antwort",n:openL.length}];
+      const visible=active.filter(p=>{
+        const st=stOf(ev,p);
+        return statusFilter==="all"||(statusFilter==="open"?!st:st===statusFilter)||pinned.has(p.id);
+      });
+      const saveKeep=(e2,pid,st,note)=>{ setPinned(prev=>new Set(prev).add(pid)); return save(e2,pid,st,note); };
       return(<div key={ev.key} style={{background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`,padding:"12px 16px",marginBottom:10}}>
-        <div onClick={()=>setOpenKey(isOpen?null:ev.key)} style={{cursor:"pointer"}}>
+        <div onClick={()=>{setOpenKey(isOpen?null:ev.key);setPinned(new Set());}} style={{cursor:"pointer"}}>
           <RsvpEventHead ev={ev}/>
           <div style={{display:"flex",gap:14,fontSize:13,fontWeight:800,marginTop:8}}>
             <span style={{color:"#16a34a"}}>✅ {yes.length}</span>
+            <span style={{color:"#b45309"}}>🤔 {maybe.length}</span>
             <span style={{color:"#dc2626"}}>❌ {no.length}</span>
             <span style={{color:C.muted}}>⏳ {openL.length}</span>
             <span style={{marginLeft:"auto",color:C.muted,fontWeight:600}}>{isOpen?"▲":"▼"}</span>
           </div>
-          {!isOpen&&no.some(p=>rsvps[rsvpKey(ev.key,p.id)]?.note)&&<div style={{fontSize:12,color:C.muted,marginTop:6}}>{no.filter(p=>rsvps[rsvpKey(ev.key,p.id)]?.note).map(p=>`${p.name}: ${rsvps[rsvpKey(ev.key,p.id)].note}`).join(" · ")}</div>}
+          {!isOpen&&[...no,...maybe].some(p=>rsvps[rsvpKey(ev.key,p.id)]?.note)&&<div style={{fontSize:12,color:C.muted,marginTop:6}}>{[...no,...maybe].filter(p=>rsvps[rsvpKey(ev.key,p.id)]?.note).map(p=>`${p.name}: ${rsvps[rsvpKey(ev.key,p.id)].note}`).join(" · ")}</div>}
         </div>
         {isOpen&&<div>
-          {group("❌ Absagen",no)}
-          {group("⏳ Keine Antwort",openL)}
-          {group("✅ Zusagen",yes)}
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",margin:"12px 0 4px"}}>
+            {filters.map(f=><button key={f.k} onClick={()=>{setStatusFilter(f.k);setPinned(new Set());}} style={{padding:"5px 10px",borderRadius:20,border:`1.5px solid ${statusFilter===f.k?C.primary:C.border}`,background:statusFilter===f.k?C.accentL:C.card,color:statusFilter===f.k?C.primary:C.muted,fontWeight:700,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{f.l} {f.n}</button>)}
+          </div>
+          {visible.length===0&&<div style={{fontSize:13,color:C.muted,padding:"10px 0"}}>Keine Spieler in dieser Auswahl.</div>}
+          {visible.map(p=><RsvpKidRow key={p.id} kid={p} ev={ev} rsvp={rsvps[rsvpKey(ev.key,p.id)]} onSave={saveKeep} compact/>)}
         </div>}
       </div>);
     })}
