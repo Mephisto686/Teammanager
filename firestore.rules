@@ -23,14 +23,39 @@ service cloud.firestore {
       return isSignedIn() &&
         exists(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid));
     }
+    // Ersteller einer Gruppe (Feld createdBy im Gruppen-Dokument) – darf sein Team initial einrichten
+    function isGroupCreator(groupId) {
+      return isSignedIn() &&
+        get(/databases/$(database)/documents/groups/$(groupId)).data.createdBy == request.auth.uid;
+    }
+    // Anmeldeschluss: Ist für den Termin (Teil der Dokument-ID vor "__") eine Frist gesetzt und abgelaufen,
+    // dürfen Eltern/Spieler nicht mehr zu-/absagen. Trainer/Admins sind davon ausgenommen (siehe rsvps).
+    function rsvpOpen(groupId, docId) {
+      let metaPath = /databases/$(database)/documents/groups/$(groupId)/eventMeta/$(docId.split('__')[0]);
+      return !exists(metaPath)
+        || !('deadlineMs' in get(metaPath).data)
+        || request.time.toMillis() < get(metaPath).data.deadlineMs;
+    }
+    // Admin des Teams (Rolle "admin" im Mitgliedsdokument) oder globaler Admin
+    function isGroupAdmin(groupId) {
+      return isGlobalAdmin() || (isGroupMember(groupId) && groupRole(groupId) == "admin");
+    }
+    // Offener Beitritt: Eltern/Spieler dürfen auch ohne Code beitreten (Standard; Admin kann das im Team ausschalten: openJoin=false)
+    function groupOpen(groupId) {
+      return get(/databases/$(database)/documents/groups/$(groupId)).data.get('openJoin', true) != false;
+    }
+    // Gültiger Einladungscode dieses Teams (wird im Mitgliedsdokument als "joinCode" mitgeschickt)
+    function validJoinCode(groupId) {
+      return ('joinCode' in request.resource.data)
+        && exists(/databases/$(database)/documents/inviteCodes/$(request.resource.data.joinCode))
+        && get(/databases/$(database)/documents/inviteCodes/$(request.resource.data.joinCode)).data.groupId == groupId;
+    }
     function canWriteGroup(groupId) {
       return isGlobalAdmin() ||
         (isGroupMember(groupId) && groupRole(groupId) in ["admin","trainer"]);
     }
 
     // ── LEGACY: alte roles/{uid} — global ──────────────────────────
-    // "gesperrt" (banned) als globale Vollsperre entfällt (Sperren jetzt pro Gruppe).
-    // Bleibt nur noch für: globale Admin-Kennzeichnung + Migrations-Fallback.
     match /roles/{uid} {
       allow read: if isSignedIn();
       allow create: if isSignedIn() && request.auth.uid == uid;
@@ -38,36 +63,45 @@ service cloud.firestore {
     }
 
     // ── GRUPPEN-VERZEICHNIS ──────────────────────────────────────────
-    // Metadaten (Name etc.) sind für JEDEN eingeloggten Nutzer lesbar,
-    // damit das offene Dropdown "Team beitreten" funktioniert.
-    // Betrifft NUR dieses Dokument, nicht die Unter-Collections darunter.
     match /groups/{groupId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn(); // Anlegen einer neuen Gruppe
+      allow create: if isSignedIn();
       allow update, delete: if canWriteGroup(groupId);
 
       // Mitgliederliste der Gruppe
+      // NEU: Eltern sehen nur noch ihr eigenes Mitgliedsdokument (Trainer/Admin die ganze Liste).
       match /members/{uid} {
-        // TEST: bewusst ohne isGlobalAdmin()/isGroupMember() (die get()/exists() nutzen) —
-        // um zu prüfen, ob DAS der Blocker für die collectionGroup-Abfrage ist.
-        allow read: if isSignedIn() && resource.data.uid == request.auth.uid;
-        // Selbstbeitritt per Einladungscode: nur mit Rolle "eltern" möglich,
-        // niemals admin/trainer im Erstschreiben. Höherstufen braucht canWriteGroup.
+        allow read: if isGlobalAdmin() || canWriteGroup(groupId) || (isSignedIn() && request.auth.uid == uid);
+        // Selbstbeitritt nur mit den Rollen "eltern" und/oder "spieler" (Feld "roles"), nur mit diesen Feldern
+        // und nur in offenen Teams oder mit gültigem Einladungscode. Trainer/Admin gibt es nur durch Bestätigung eines Admins.
+        // Verknüpfte Kinder ("childIds") setzen nur Trainer/Admin bzw. die Cloud Function "claimChildren".
+        // Der Ersteller eines neuen Teams legt sich selbst als "admin" an.
         allow create: if isGlobalAdmin() ||
-          (isSignedIn() && request.auth.uid == uid && request.resource.data.role == "eltern") ||
-          canWriteGroup(groupId);
-        allow update, delete: if canWriteGroup(groupId);
+          (isSignedIn() && request.auth.uid == uid
+            && request.resource.data.role in ["eltern","spieler"]
+            && request.resource.data.keys().hasOnly(["uid","role","roles","name","email","photo","joinedAt","joinCode"])
+            && (!('roles' in request.resource.data) || request.resource.data.roles.hasOnly(["eltern","spieler"]))
+            && (groupOpen(groupId) || validJoinCode(groupId))) ||
+          (isSignedIn() && request.auth.uid == uid && request.resource.data.role == "admin" && isGroupCreator(groupId)) ||
+          isGroupAdmin(groupId);
+        // Rollen ("role", "roles") ändern nur Admins. Trainer dürfen ausschließlich die Verknüpfung mit
+        // Kindern/Spielerprofil ("childIds") setzen. Jeder darf im eigenen Dokument nur "name" ändern (Profil).
+        allow update: if isGroupAdmin(groupId) ||
+          (canWriteGroup(groupId) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['childIds'])) ||
+          (isSignedIn() && request.auth.uid == uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name']));
+        // Löschen: Admins, sowie jeder sein eigenes Mitgliedsdokument (Team verlassen / eigenes Profil löschen)
+        allow delete: if isGroupAdmin(groupId) || (isSignedIn() && request.auth.uid == uid);
       }
 
       // Einladungscode der Gruppe — nur für Mitglieder/Admin sichtbar
       match /settings/{docId} {
         allow read: if isGlobalAdmin() || isGroupMember(groupId);
-        allow write: if canWriteGroup(groupId);
+        allow write: if canWriteGroup(groupId) || isGroupCreator(groupId);
       }
 
       // Beitrittswünsche (Dropdown-Weg ohne Code)
       match /joinRequests/{uid} {
-        // Antragsteller darf seinen eigenen Wunsch anlegen/zurückziehen
         allow create: if isSignedIn() && request.auth.uid == uid;
         allow read: if canWriteGroup(groupId) || (isSignedIn() && request.auth.uid == uid);
         allow delete: if canWriteGroup(groupId) || (isSignedIn() && request.auth.uid == uid);
@@ -75,18 +109,63 @@ service cloud.firestore {
       }
 
       // Trainings/Kader/Turniere/Kasse/To-Dos etc. — je Kategorie ein Dokument
+      // NEU: Lesen nur für Trainer/Admin. Eltern dürfen ausschließlich die reduzierten
+      // Projektionen "playersPublic" (id, Name) und "eventsPublic" (Termine) lesen.
       match /shared/{col} {
-        allow read: if isGlobalAdmin() || isGroupMember(groupId);
+        allow read: if isGlobalAdmin() || (isGroupMember(groupId) &&
+          (col in ["playersPublic","eventsPublic"] || groupRole(groupId) in ["admin","trainer"]));
         // Kassenbuch: nur admin darf schreiben (spiegelt CAN.editKasse im Client)
         allow write: if col == "kassenbuch"
           ? (isGlobalAdmin() || (isGroupMember(groupId) && groupRole(groupId) == "admin"))
           : canWriteGroup(groupId);
       }
+
+      // AKTIVITÄTSLOG – drei Stufen, je nach Sichtbarkeit. Einträge sind unveränderlich (nur anlegen).
+      //  log_all:   alle Mitglieder (z. B. Termine)
+      //  log_coach: nur Trainer & Admins (Trainingsplanung, Mannschaften, Kasse …)
+      //  log_admin: nur Admins (reserviert)
+      match /log_all/{id} {
+        allow read: if isGlobalAdmin() || isGroupMember(groupId);
+        allow create: if canWriteGroup(groupId);
+        allow update, delete: if false;
+      }
+      match /log_coach/{id} {
+        allow read: if canWriteGroup(groupId);
+        allow create: if canWriteGroup(groupId);
+        allow update, delete: if false;
+      }
+      match /log_admin/{id} {
+        allow read: if isGlobalAdmin() || (isGroupMember(groupId) && groupRole(groupId) == "admin");
+        allow create: if canWriteGroup(groupId);
+        allow update, delete: if false;
+      }
+
+      // Termin-Metadaten (Anmeldeschluss): alle Mitglieder lesen, nur Trainer/Admin schreiben
+      match /eventMeta/{eventKey} {
+        allow read: if isGlobalAdmin() || isGroupMember(groupId);
+        allow write: if canWriteGroup(groupId);
+      }
+
+      // NEU: Zu-/Absagen zu Terminen (ein Dokument je Termin+Kind: {terminKey}__{spielerId})
+      // Eltern dürfen nur für Kinder schreiben, die in ihrem Mitgliedsdokument (childIds) verknüpft sind.
+      match /rsvps/{docId} {
+        allow read: if isGlobalAdmin() || isGroupMember(groupId);
+        allow create, update: if canWriteGroup(groupId) ||
+          (isGroupMember(groupId)
+            && rsvpOpen(groupId, docId)
+            && docId.matches('.*__' + request.resource.data.playerId)
+            && request.resource.data.playerId in
+               get(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)).data.get('childIds', []));
+        allow delete: if canWriteGroup(groupId) ||
+          (isGroupMember(groupId)
+            && rsvpOpen(groupId, docId)
+            && docId.matches('.*__' + resource.data.playerId)
+            && resource.data.playerId in
+               get(/databases/$(database)/documents/groups/$(groupId)/members/$(request.auth.uid)).data.get('childIds', []));
+      }
     }
 
     // ── EINLADUNGSCODES ──────────────────────────────────────────────
-    // Gezieltes Nachschlagen eines bekannten Codes ist erlaubt (get),
-    // ein Durchsuchen/Auflisten ALLER Codes ist gesperrt (list).
     match /inviteCodes/{code} {
       allow get: if isSignedIn();
       allow list: if false;
@@ -98,6 +177,7 @@ service cloud.firestore {
     match /presence/{uid} {
       allow read: if isSignedIn();
       allow write: if isSignedIn() && request.auth.uid == uid;
+      allow delete: if isGlobalAdmin(); // Admin räumt beim Löschen eines Nutzers auf
     }
 
     // ── ACTIVITY LOG ─────────────────────────────────────────────────

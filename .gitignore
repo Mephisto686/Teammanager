@@ -1,0 +1,19 @@
+# Abhaengigkeiten und Build
+node_modules
+dist
+dev-dist
+
+# Lokale Konfiguration und Geheimnisse
+.env
+.env.*
+*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Betriebssystem und Editor
+.DS_Store
+Thumbs.db
+.vscode/*
+.idea
