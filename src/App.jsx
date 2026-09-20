@@ -397,6 +397,34 @@ function usePersonalSettings(userId) {
 
   return [prefs, setPrefs];
 }
+// ── TEAM-WECHSLER (Header): zeigt das aktive Team und die eigene Rolle darin ──
+function TeamSwitcher() {
+  const ctx = React.useContext(RoleSwitchCtx);
+  const [open,setOpen] = useState(false);
+  if(!ctx || !ctx.teams || ctx.teams.length<2) return null;
+  const cur = ctx.teams.find(t=>t.id===ctx.currentTeamId) || ctx.teams[0];
+  const short = n => (n||"").length>16 ? n.slice(0,15)+"…" : n;
+  return(<div style={{position:"relative",flexShrink:0}}>
+    <button onClick={()=>setOpen(o=>!o)} title="Team wechseln" style={{display:"flex",alignItems:"center",gap:5,padding:"5px 10px",borderRadius:20,border:`1.5px solid ${C.border}`,background:C.card,color:C.text,fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}}>🏟 {short(cur.name)} <span style={{opacity:.6}}>▾</span></button>
+    {open&&<>
+      <div style={{position:"fixed",inset:0,zIndex:9990}} onClick={()=>setOpen(false)}/>
+      <div style={{position:"absolute",top:36,right:0,background:C.card,border:`1px solid ${C.border}`,borderRadius:12,boxShadow:"0 4px 20px rgba(0,0,0,.18)",padding:6,minWidth:240,zIndex:9991}}>
+        <div style={{fontSize:10,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,padding:"4px 8px 6px"}}>Team wechseln</div>
+        {ctx.teams.map(t=>{
+          const r=USER_ROLES[t.role]||USER_ROLES.eltern, active=t.id===ctx.currentTeamId;
+          return(<button key={t.id} onClick={()=>{setOpen(false);if(!active)ctx.switchTeam(t.id);}} style={{display:"flex",alignItems:"center",gap:8,width:"100%",padding:"9px 10px",borderRadius:8,border:"none",background:active?C.accentL:"transparent",color:C.text,fontWeight:700,fontSize:13,cursor:"pointer",fontFamily:"inherit",textAlign:"left"}}>
+            <span style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.name}</span>
+            <span style={{fontSize:11,fontWeight:800,padding:"2px 8px",borderRadius:20,background:r.bg,color:r.color,flexShrink:0}}>{r.emoji} {r.label}</span>
+            {active&&<span style={{color:C.primary}}>✓</span>}
+          </button>);
+        })}
+        <div style={{borderTop:`1px solid ${C.border}`,margin:"6px 0 2px"}}/>
+        <button onClick={()=>{setOpen(false);ctx.manageTeams&&ctx.manageTeams();}} style={{display:"block",width:"100%",padding:"9px 10px",borderRadius:8,border:"none",background:"transparent",color:C.primary,fontWeight:800,fontSize:13,cursor:"pointer",fontFamily:"inherit",textAlign:"left"}}>➕ Team anlegen / beitreten</button>
+      </div>
+    </>}
+  </div>);
+}
+
 // ── ROLLENWECHSEL (Header) ────────────────────────────────────────
 // Stellt die tatsächliche und die angezeigte Rolle bereit. Admin darf zwischen
 // Admin/Trainer/Eltern wechseln, Trainer mit verknüpftem Kind zwischen Trainer/Eltern.
@@ -443,7 +471,8 @@ const rsvpKey = (eventKey, playerId) => eventKey + "__" + playerId;
 function useMyMember(groupId, user) {
   const [member,setMember] = useState(null);
   useEffect(()=>{
-    if(!fbDb || !groupId || !user){ setMember(null); return; }
+    setMember(null);
+    if(!fbDb || !groupId || !user){ return; }
     const unsub = onSnapshot(doc(fbDb,"groups",groupId,"members",user.uid), snap=>{
       setMember(snap.exists()?snap.data():null);
     }, ()=>setMember(null));
@@ -456,7 +485,8 @@ function useMyMember(groupId, user) {
 function useRsvps(groupId, user) {
   const [rsvps,setRsvps] = useState({});
   useEffect(()=>{
-    if(!fbDb || !groupId || !user){ setRsvps({}); return; }
+    setRsvps({});
+    if(!fbDb || !groupId || !user){ return; }
     const q = query(collection(fbDb,"groups",groupId,"rsvps"), where("date",">=",todayISO()));
     const unsub = onSnapshot(q, snap=>{
       const m={}; snap.docs.forEach(d=>{ m[d.id]=d.data(); }); setRsvps(m);
@@ -509,7 +539,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.30.1";
+const APP_VERSION = "3.31.1";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -4358,13 +4388,14 @@ function InviteCard({code,toast}) {
 }
 
 // ── TEAMS: wechseln, weiteres Team anlegen oder beitreten (alle Rollen) ──
-function TeamsCard({user,groupId,memberships,onSwitchGroup,toast}) {
+function TeamsCard({user,groupId,memberships,onSwitchGroup,toast,canRename=false}) {
   const allGroups=useAllGroups(user);
   const [modal,setModal]=useState(null); // "create" | "join"
   const [name,setName]=useState("");
   const [code,setCode]=useState("");
   const [role,setRole]=useState(()=>{try{return localStorage.getItem("pendingJoinRole")||"eltern";}catch(e){return "eltern";}});
   const [busy,setBusy]=useState(false);
+  const [newName,setNewName]=useState("");
   const nameOf=gid=>allGroups.find(g=>g.id===gid)?.name||gid;
   const goto=gid=>{ try{localStorage.setItem("currentGroupId",gid);}catch(e){} setTimeout(()=>window.location.reload(),400); };
   const doCreate=async()=>{
@@ -4380,6 +4411,16 @@ function TeamsCard({user,groupId,memberships,onSwitchGroup,toast}) {
     if(r.pending){ toast("Beitrittswunsch gesendet – der Admin muss bestätigen"); setModal(null); return; }
     toast(r.already?"Du bist schon in diesem Team":"Team beigetreten ✓"); goto(r.groupId);
   };
+  // Admin: Team nachträglich umbenennen (Name steht im Gruppen-Dokument und wird überall live übernommen)
+  const doRename=async()=>{
+    const n=newName.trim();
+    if(!n||!groupId) return;
+    if(n===nameOf(groupId)){ setModal(null); return; }
+    setBusy(true);
+    try{ await setDoc(doc(fbDb,"groups",groupId),{name:n.slice(0,60)},{merge:true}); toast("Team umbenannt ✓"); setModal(null); }
+    catch(e){ console.warn(e); toast("Umbenennen nicht möglich – bitte Berechtigung prüfen","err"); }
+    setBusy(false);
+  };
   const inp={width:"100%",padding:"10px 14px",border:`1.5px solid ${C.border}`,borderRadius:10,fontSize:14,color:C.text,background:C.bg,outline:"none",fontFamily:"inherit",boxSizing:"border-box"};
   return(<div style={{marginBottom:16,padding:"14px 16px",background:C.card,borderRadius:12,border:`1.5px solid ${C.border}`}}>
     <div style={{fontSize:12,fontWeight:800,color:C.muted,textTransform:"uppercase",letterSpacing:.6,marginBottom:10}}>🏟 Teams</div>
@@ -4389,9 +4430,16 @@ function TeamsCard({user,groupId,memberships,onSwitchGroup,toast}) {
       </select>
       :<div style={{fontSize:14,color:C.text,marginBottom:10}}>Aktives Team: <b>{nameOf(groupId)}</b></div>}
     <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+      {canRename&&<Btn sm variant="secondary" onClick={()=>{setNewName(nameOf(groupId));setModal("rename");}}>✏️ Team umbenennen</Btn>}
       <Btn sm variant="secondary" onClick={()=>setModal("create")}>➕ Weiteres Team anlegen</Btn>
       <Btn sm variant="secondary" onClick={()=>setModal("join")}>🔗 Team beitreten</Btn>
     </div>
+    {modal==="rename"&&<Modal title="Team umbenennen" onClose={()=>setModal(null)}>
+      <div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:8}}>Neuer Name des Teams / Vereins</div>
+      <input value={newName} onChange={e=>setNewName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")doRename();}} maxLength={60} style={inp}/>
+      <div style={{fontSize:11,color:C.muted,marginTop:8}}>Der neue Name erscheint sofort für alle Mitglieder, auch in der Team-Auswahl.</div>
+      <div style={{display:"flex",justifyContent:"flex-end",marginTop:14}}><Btn onClick={doRename} disabled={busy||!newName.trim()}>{busy?"…":"Speichern"}</Btn></div>
+    </Modal>}
     {modal==="create"&&<Modal title="Neues Team anlegen" onClose={()=>setModal(null)}>
       <div style={{fontWeight:800,fontSize:14,color:C.text,marginBottom:8}}>Name des Teams / Vereins</div>
       <input value={name} onChange={e=>setName(e.target.value)} placeholder="z. B. SC Sternschanze G-Jugend 2019" style={inp}/>
@@ -4484,7 +4532,7 @@ function GroupManagementPanel({groupId, role, memberships, onSwitchGroup, toast,
   return(<div style={{marginBottom:28}}>
     <h2 style={{fontSize:16,fontWeight:800,color:C.text,marginBottom:14,paddingBottom:8,borderBottom:`2px solid ${C.accentL}`}}>👥 Team-Verwaltung</h2>
 
-    <TeamsCard user={firebaseUser} groupId={groupId} memberships={memberships} onSwitchGroup={onSwitchGroup} toast={toast}/>
+    <TeamsCard user={firebaseUser} groupId={groupId} memberships={memberships} onSwitchGroup={onSwitchGroup} toast={toast} canRename={canManage}/>
 
     {!isCoach&&<div style={{fontSize:13,color:C.muted}}>Nur Trainer und Admins können Mitglieder verwalten und Einladungen verschicken.</div>}
 
@@ -4904,6 +4952,7 @@ function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets
     can(role,"calendar")&&{icon:"🗓",title:"Termine",sub:"Alle Termine",onClick:()=>onNavigate("calendar")},
     {icon:"📅",title:"Neues Training",sub:nextSession?relDateLabel(nextSession.date):"Neue Einheit",onClick:()=>onOpenCalendarItem?onOpenCalendarItem({type:"newTraining"}):onNavigate("calendar")},
     {icon:"👥",title:"Team",sub:`${activePlayers.length} Spieler`,onClick:()=>onNavigate("team")},
+    {icon:"🔗",title:"Einladen",sub:"Link & Code teilen",onClick:()=>onNavigate("settings")},
     can(role,"teamplaner")&&{icon:"🔀",title:"Teams losen",sub:`${(teamsets||[]).length} gespeichert`,onClick:()=>onNavigate("teamplaner")},
     can(role,"turnier")&&{icon:"🏆",title:"Turniere",sub:`${(tournaments||[]).length} geplant`,onClick:()=>onNavigate("turnier")},
     can(role,"orga")&&{icon:"📋",title:"To Dos",sub:openTodos.length?`${openTodos.length} offen`:"Alles erledigt",badge:openTodos.length||null,onClick:()=>onNavigate("orga")},
@@ -4924,7 +4973,7 @@ function StartPage({players,coaches,sessions,tournaments,todos,meetings,teamsets
         <div style={{fontSize:13,color:C.muted,fontWeight:600}}>{greeting}{firstName?`, ${firstName}`:""}</div>
         <h1 style={{margin:"2px 0 0",fontSize:24,fontWeight:900,color:C.text}}>⚽ Übersicht</h1>
       </div>
-      <div style={{marginLeft:"auto",flexShrink:0}}><RoleSwitcher/></div>
+      <div style={{marginLeft:"auto",display:"flex",alignItems:"center",justifyContent:"flex-end",flexWrap:"wrap",gap:8,maxWidth:"62%"}}><TeamSwitcher/><RoleSwitcher/></div>
     </div>
 
     <div className="tm-hscroll" style={{display:"flex",gap:10,overflowX:"auto",marginBottom:24,paddingBottom:2}}>
@@ -5118,7 +5167,7 @@ function ParentStartPage({role,currentUser,events,myKids,rsvps,openRsvps,onNavig
         <div style={{fontSize:13,color:C.muted,fontWeight:600}}>{greeting}{firstName?`, ${firstName}`:""}</div>
         <h1 style={{margin:"2px 0 0",fontSize:24,fontWeight:900,color:C.text}}>⚽ Übersicht</h1>
       </div>
-      <div style={{marginLeft:"auto",flexShrink:0}}><RoleSwitcher/></div>
+      <div style={{marginLeft:"auto",display:"flex",alignItems:"center",justifyContent:"flex-end",flexWrap:"wrap",gap:8,maxWidth:"62%"}}><TeamSwitcher/><RoleSwitcher/></div>
     </div>
 
     {myKids.length===0
@@ -5328,43 +5377,52 @@ function useFirebaseAuth() {
 // ── FIREBASE SYNC HOOK ────────────────────────────────────────────
 // Syncs a named collection to/from Firestore in real-time.
 // Falls back to local Dexie when offline or not logged in.
+// Lokaler Cache-Schlüssel pro Team (das Standard-Team behält den alten Schlüssel, damit dessen Cache erhalten bleibt)
+const cloudCacheKey = (groupId, key) => groupId===DEFAULT_GROUP_ID ? "cloud_"+key : `cloud_${groupId}_${key}`;
 function useCloudStorage(key, def, user, groupId=DEFAULT_GROUP_ID) {
-  const [data, setData]   = useState(def);
-  const [ready, setReady] = useState(false);
-  const localKey = "cloud_" + key;
+  const localKey = cloudCacheKey(groupId, key);
+  // Zustand gehört immer zu genau einem Team (k). Nach einem Team-Wechsel werden nie Daten des alten Teams geliefert oder geschrieben.
+  const [store, setStore] = useState({k:localKey, data:def, ready:false, fromCloud:false});
+  const fresh = store.k===localKey;
+  const data  = fresh ? store.data : def;
+  const ready = fresh ? store.ready : false;
+  const patch = fn => setStore(st => fn(st.k===localKey ? st : {k:localKey, data:def, ready:false, fromCloud:false}));
 
-  // Load from local cache first (instant)
+  // Load from local cache first (instant) – aber nie über frischere Cloud-Daten drüberschreiben
   useEffect(() => {
+    let cancelled=false;
     db.kv.get(localKey).then(row => {
-      if (row?.value) setData(JSON.parse(row.value));
-      setReady(true);
-    }).catch(() => setReady(true));
-  }, [localKey]);
+      if(cancelled) return;
+      patch(b => ({...b, data:(row?.value && !b.fromCloud) ? JSON.parse(row.value) : b.data, ready:true}));
+    }).catch(() => { if(!cancelled) patch(b => ({...b, ready:true})); });
+    return () => { cancelled=true; };
+  }, [localKey]); // eslint-disable-line
 
-  // Subscribe to Firestore when logged in — jetzt unter groups/{groupId}/shared/{key}
+  // Subscribe to Firestore when logged in — unter groups/{groupId}/shared/{key}
   useEffect(() => {
     if (!user || !groupId) return;
     if(!fbDb) return;
     const unsub = onSnapshot(doc(fbDb, "groups", groupId, "shared", key), snap => {
       if (snap.exists()) {
         const items = snap.data().items;
-        setData(items);
+        patch(b => ({...b, data:items, fromCloud:true}));
         db.kv.put({ key: localKey, value: JSON.stringify(items) }).catch(() => {});
       }
     }, e => console.warn("onSnapshot", key, e));
     return unsub;
-  }, [user, groupId, key, localKey]);
+  }, [user, groupId, key, localKey]); // eslint-disable-line
 
   const save = useCallback((nextOrFn) => {
-    setData(prev => {
-      const next = typeof nextOrFn === 'function' ? nextOrFn(prev) : nextOrFn;
+    setStore(st => {
+      const base = st.k===localKey ? st : {k:localKey, data:def, ready:false, fromCloud:false};
+      const next = typeof nextOrFn === 'function' ? nextOrFn(base.data) : nextOrFn;
       // Write locally
       db.kv.put({ key: localKey, value: JSON.stringify(next) }).catch(() => {});
       // Write to cloud if logged in
       if (user && groupId) fbWriteGroup(groupId, key, next);
-      return next;
+      return {...base, data:next};
     });
-  }, [user, groupId, key, localKey]);
+  }, [user, groupId, key, localKey]); // eslint-disable-line
 
   return [data, save, ready];
 }
@@ -5383,7 +5441,7 @@ function PageHeader({title, sub, onlineUsers, currentUser, onGoHome, onGoBack}) 
           {sub&&<div style={{fontSize:13,color:C.muted,marginTop:2}}>{sub}</div>}
         </div>
       </div>
-      <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0,marginLeft:12}}><RoleSwitcher/>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",flexWrap:"wrap",gap:8,minWidth:0,maxWidth:"62%",marginLeft:12}}><TeamSwitcher/><RoleSwitcher/>
       {users.length>0&&<div style={{position:"relative",flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer"}} onClick={()=>setShowList(s=>!s)}>
           <div style={{display:"flex"}}>
@@ -5478,7 +5536,7 @@ function AuthScreen({onGoogle,onEmail,onRegister,onReset}) {
         </div>
 
         {mode==="register"&&inp(name,setName,"text","Name (Anzeigename)","name")}
-        {mode==="register"&&<div><div style={{fontSize:12,fontWeight:700,color:C.muted,marginBottom:6}}>Ich bin …</div><RolePicker value={role} onChange={setRole}/>{role==="trainer"&&<div style={{fontSize:11,color:C.muted,marginTop:6}}>Trainer-Zugänge bestätigt der Team-Admin.</div>}</div>}
+        {mode==="register"&&<div><div style={{fontSize:12,fontWeight:700,color:C.muted,marginBottom:6}}>Ich bin …</div><RolePicker value={role} onChange={setRole}/>{role==="trainer"&&<div style={{fontSize:11,color:C.muted,marginTop:6}}>Trainer-Zugänge bestätigt der Team-Admin.</div>}{!pendingInvite&&<div style={{fontSize:11,color:C.muted,marginTop:6}}>Nach der Registrierung kannst du ein neues Team anlegen oder per Code/Link beitreten.</div>}</div>}
         {inp(email,setEmail,"email","E-Mail-Adresse","email")}
         {mode!=="reset"&&inp(password,setPassword,"password","Passwort","current-password")}
 
@@ -5704,19 +5762,23 @@ export default function App() {
     if(!stillValid && memberships.length===0) setCurrentGroupId(null);
   },[memberships]);
   const currentMembership = memberships?.find(m=>m.groupId===currentGroupId);
+  const allGroups = useAllGroups(user);
+  // Team wechseln: Seite zurücksetzen, damit man nie auf einer Seite landet, die es in der neuen Rolle nicht gibt
+  const switchGroup = gid => { setCurrentGroupId(gid); setPage("start"); setPageHistory([]); };
   // Effektive Rolle für Tab-/Aktions-Berechtigungen: globaler Admin ist überall admin,
   // sonst zählt die Rolle innerhalb der aktuell aktiven Gruppe.
-  const realRole = isGlobalAdmin ? "admin" : (currentMembership?.role || null);
+  // Maßgeblich ist die Rolle im aktuellen Team (ein Nutzer kann in Team 1 Trainer, in Team 2 Elternteil, in Team 3 Spieler sein)
+  const realRole = currentMembership?.role || (isGlobalAdmin ? "admin" : null);
   const isCoachReal = realRole==="admin" || realRole==="trainer"; // echte Rechte, unabhängig von der gewählten Ansicht
   // Eigenes Mitgliedsdokument (u.a. verknüpfte Kinder) + wählbare Ansichten
   const myMember = useMyMember(currentGroupId, user);
   const [viewRoleRaw,setViewRoleRaw]=useState(null);
-  useEffect(()=>{ if(user?.uid) setViewRoleRaw(localStorage.getItem("viewRole_"+user.uid)||null); },[user?.uid]);
+  useEffect(()=>{ setViewRoleRaw(user?.uid&&currentGroupId?(localStorage.getItem(`viewRole_${user.uid}_${currentGroupId}`)||null):null); },[user?.uid,currentGroupId]);
   const hasChildLink = (myMember?.childIds||[]).length>0;
   const roleViews = realRole==="admin" ? ["admin","trainer","eltern","spieler"] : (realRole==="trainer"&&hasChildLink) ? ["trainer","eltern"] : [];
   // Effektive Rolle = gewählte Ansicht (nur wenn erlaubt), sonst die echte Rolle
   const role = roleViews.includes(viewRoleRaw) ? viewRoleRaw : realRole;
-  const setViewRole = v => { setViewRoleRaw(v); if(user?.uid) localStorage.setItem("viewRole_"+user.uid,v); };
+  const setViewRole = v => { setViewRoleRaw(v); if(user?.uid&&currentGroupId) localStorage.setItem(`viewRole_${user.uid}_${currentGroupId}`,v); };
   const [prefs, setPrefs] = usePersonalSettings(user?.uid);
   // Offene Beitrittswünsche der aktuellen Gruppe (nur relevant für den Gruppen-Admin)
   const groupJoinRequests = useJoinRequests(currentGroupId, role==="admin");
@@ -5776,12 +5838,12 @@ export default function App() {
   useEffect(()=>{
     if(!isFamily(realRole)) return;
     ["players","coaches","kassenbuch","todos","meetings","exercises","sessions","tournaments","recurringSlots","customCats","teamsets"]
-      .forEach(k=>db.kv.delete("cloud_"+k).catch(()=>{}));
-  },[realRole]);
+      .forEach(k=>db.kv.delete(cloudCacheKey(currentGroupId,k)).catch(()=>{}));
+  },[realRole,currentGroupId]);
   const [apiKey,     setApiKey,     ar]=useStorage("apiKey",     "");
   const [lastExportAt,setLastExportAt]=useStorage("lastExportAt","");
-  const [customCats, setCustomCats    ]=useCloudStorage("customCats", [], user);
-  const [teamsets,   setTeamsets        ]=useCloudStorage("teamsets",   [], user);
+  const [customCats, setCustomCats    ]=useCloudStorage("customCats", [], user, currentGroupId);
+  const [teamsets,   setTeamsets        ]=useCloudStorage("teamsets",   [], user, currentGroupId);
   const saveTSets=x=>{
     setTeamsets(upsert(x));
     const name=typeof x==="object"&&!Array.isArray(x)?x.name||"Aufstellung":"Aufstellung";
@@ -5885,7 +5947,7 @@ export default function App() {
   // In keiner Gruppe? → Onboarding (Team anlegen oder beitreten). Jeder eingeloggte Nutzer landet hier,
   // niemand wird mehr global blockiert.
   if(memberships.length===0||!currentGroupId) return <GroupOnboarding user={user} onLogout={logout} toast={toast}/>;
-  return(<RoleSwitchCtx.Provider value={{views:roleViews,viewRole:role,realRole,setViewRole}}><div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:C.bg,minHeight:"100vh"}}>
+  return(<RoleSwitchCtx.Provider value={{views:roleViews,viewRole:role,realRole,setViewRole,teams:(memberships||[]).map(m=>({id:m.groupId,name:allGroups.find(g=>g.id===m.groupId)?.name||m.groupId,role:m.role})),currentTeamId:currentGroupId,switchTeam:switchGroup,manageTeams:()=>setPage("settings")}}><div style={{fontFamily:"system-ui,-apple-system,sans-serif",background:C.bg,minHeight:"100vh"}}>
     <style>{`*{box-sizing:border-box}body{margin:0}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}`}</style>
     <Toasts/>
     <Nav page={page} setPage={setPage} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0,openRsvps}}/>
@@ -5900,8 +5962,8 @@ export default function App() {
       {page==="calendar"&&isFamily(role)&&<RsvpPage role={role} events={rsvpEvents} players={rsvpPlayers} rsvps={rsvps} onSetRsvp={setRsvp} myKids={myKids} toast={toast} onlineUsers={onlineUsers} currentUser={user}/>}
       {page==="calendar"&&!isFamily(role)&&<CalendarPage rsvps={rsvps} onSetRsvp={setRsvp} pendingSetup={pendingSetup} onClearPendingSetup={()=>setPendingSetup(null)} onOpenTurnierPage={()=>setPage("turnier")} recurringSlots={recurringSlots} onSaveSlot={saveSlot} onDeleteSlot={id=>{const i=recurringSlots.find(s=>s.id===id);setRecurringSlots(prev=>prev.filter(s=>s.id!==id));showUndo("Serientermin",i,()=>setRecurringSlots(prev=>[i,...prev]));}} onGenerateSessions={generateSessions} sessions={sessions} meetings={meetings} tournaments={tournaments} players={players} coaches={coaches} exercises={exercises} onSaveSession={saveSe} onDeleteSession={id=>{const i=sessions.find(s=>s.id===id);setSessions(prev=>prev.filter(s=>s.id!==id));showUndo("Training",i,()=>setSessions(prev=>[i,...prev]));}} onSavePlayer={can(role,"editAnything")?savePl:null} onSaveMeeting={saveMeeting} onDeleteMeeting={id=>{const i=meetings.find(m=>m.id===id);setMeetings(prev=>prev.filter(m=>m.id!==id));showUndo("Trainertreff",i,()=>setMeetings(prev=>[i,...prev]));}} onSaveTournament={saveTo} onSaveExercise={saveEx} apiKey={apiKey} toast={toast} readOnly={!can(role,"editAnything")} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} pendingTarget={pendingCalendarTarget} onClearPendingTarget={()=>setPendingCalendarTarget(null)} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="kasse"    &&can(role,"kasse")&&<KassePage kassenbuch={kassenbuch} onSave={can(role,"editKasse")?saveKa:null} onDelete={can(role,"editKasse")?id=>{const i=kassenbuch.find(k=>k.id===id);setKassenbuch(prev=>prev.filter(k=>k.id!==id));showUndo("Eintrag",i,()=>setKassenbuch(prev=>[i,...prev]));}:null} readOnly={!can(role,"editKasse")} toast={toast} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
-      {page==="settings"&&isFamily(role)&&<ParentSettingsPage role={role} memberships={memberships} onSwitchGroup={setCurrentGroupId} firebaseUser={user} groupId={currentGroupId} myKids={myKids} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onLogout={logout} toast={toast} onlineUsers={onlineUsers}/>}
-      {(can(role,"settings")||role==="trainer")&&page==="settings"&&<SettingsPage key={role} onCreatePlayer={createPlayerProfile} exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={setCurrentGroupId} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
+      {page==="settings"&&isFamily(role)&&<ParentSettingsPage role={role} memberships={memberships} onSwitchGroup={switchGroup} firebaseUser={user} groupId={currentGroupId} myKids={myKids} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onLogout={logout} toast={toast} onlineUsers={onlineUsers}/>}
+      {(can(role,"settings")||role==="trainer")&&page==="settings"&&<SettingsPage key={role} onCreatePlayer={createPlayerProfile} exercises={exercises} players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} kassenbuch={kassenbuch} onImport={doImport} toast={toast} apiKey={apiKey} onSaveApiKey={k=>setApiKey(k)} customCats={customCats} onSaveCustomCats={setCustomCats} firebaseUser={user} onLogout={logout} onFullBackup={doFullBackup} role={role} isGlobalAdmin={isGlobalAdmin} allUsers={allUsers} setUserRole={setUserRole} setUserName={setUserName} deleteUser={deleteUser} prefs={prefs} onPrefChange={toggleDark} onFontScale={setFontScale} onlineUsers={onlineUsers} currentGroupId={currentGroupId} memberships={memberships} onSwitchGroup={switchGroup} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
     </main>
     {undoBuf&&<div style={{position:"fixed",bottom:76,left:12,right:12,zIndex:9999,display:"flex",alignItems:"center",gap:10,background:"#1e293b",color:"white",borderRadius:12,padding:"12px 16px",boxShadow:"0 4px 24px rgba(0,0,0,.35)"}}>
       <span style={{fontSize:13,fontWeight:600,flex:1}}>{undoBuf.label}</span>
