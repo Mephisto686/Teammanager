@@ -726,7 +726,7 @@ async function logActivity(user, action, detail="") {
   } catch(e) {}
 }
 
-const APP_VERSION = "3.39.0";
+const APP_VERSION = "3.39.2";
 const BUILTIN_CATS = {
   aufwaermen: { label:"Aufwärmen", emoji:"🔥", color:"#ea580c", bg:"#fff7ed", builtin:true },
   uebung:     { label:"Übung",     emoji:"⚽", color:"#2563eb", bg:"#eff6ff", builtin:true },
@@ -1826,9 +1826,12 @@ function PlayerList({players,selPlayers,setSelPlayers,onEdit,onDel,showStrength=
         const isSel=selPlayers.includes(p.id);
         const bd=getBdInfo(p);
         const rowBg=bd?.isToday?"#dcfce7":bd?.wasPast?"#fef9c3":isSel?C.accentL:"white";
-        const borderL=`4px solid ${bd?.isToday?"#22c55e":bd?.wasPast?"#fde047":isSel?C.primary:STR[p.strength]?.color||C.border}`;
+        // Linker Rand = Stärke-Farbe (bzw. Geburtstag/Auswahl). Einzelne Eigenschaften statt der Kurzschreibweisen "border"/"borderLeft",
+        // damit sich nichts gegenseitig überschreibt (sonst blieb der linke Rand bei manchen Zeilen grau).
+        const leftC=bd?.isToday?"#22c55e":bd?.wasPast?"#fde047":isSel?C.primary:STR[p.strength]?.color||C.border;
+        const sideC=isSel?C.primary:C.border;
         return(<div key={p.id} onClick={()=>setSelPlayers(prev=>prev.includes(p.id)?prev.filter(x=>x!==p.id):[...prev,p.id])}
-          style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:10,background:rowBg,borderLeft:borderL,border:`1px solid ${isSel?C.primary:C.border}`,borderLeftWidth:4,cursor:"pointer",opacity:p.active?1:.6}}>
+          style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:10,background:rowBg,borderStyle:"solid",borderWidth:"1px 1px 1px 4px",borderColor:`${sideC} ${sideC} ${sideC} ${leftC}`,cursor:"pointer",opacity:p.active?1:.6}}>
           {/* Checkbox */}
           <div style={{color:isSel?C.primary:C.muted,flexShrink:0}}>{isSel?<CheckSquare size={17}/>:<Square size={17}/>}</div>
           {/* Strength dot */}
@@ -5667,7 +5670,30 @@ function RsvpStatusPills({kids,ev,rsvps}) {
   </div>);
 }
 
-function ParentStartPage({role,currentUser,events,myKids,rsvps,openRsvps,onNavigate}) {
+// Drei kompakte Antwort-Buttons (nur Symbole): dabei / unsicher / nicht dabei. Erneutes Tippen nimmt die Antwort zurück.
+function RsvpIconButtons({st,locked,onSet}) {
+  const b=(val,emoji,col,bg,title)=>{
+    const on=st===val;
+    return <button key={val} title={title} aria-label={title} disabled={locked} onClick={e=>{e.stopPropagation();onSet(on?null:val);}}
+      style={{width:38,height:38,borderRadius:10,border:`2px solid ${on?col:C.border}`,background:on?bg:C.card,fontSize:17,lineHeight:1,cursor:locked?"default":"pointer",opacity:locked&&!on?.4:1,fontFamily:"inherit",padding:0,flexShrink:0}}>{emoji}</button>;
+  };
+  return(<div style={{display:"flex",gap:6,flexShrink:0}}>
+    {b("yes","✅","#16a34a","#dcfce7","Bin dabei")}
+    {b("maybe","🤔","#b45309","#fef3c7","Unsicher")}
+    {b("no","❌","#dc2626","#fee2e2","Bin nicht dabei")}
+  </div>);
+}
+
+function ParentStartPage({role,currentUser,events,myKids,rsvps,eventMeta={},openRsvps,onNavigate,onSetRsvp,toast}) {
+  const now=useNow();
+  // Kind, für das auf dieser Seite geantwortet wird (bei mehreren Kindern umschaltbar)
+  const [selId,setSelId]=useState(()=>{try{return sessionStorage.getItem("startKid");}catch(e){return null;}});
+  const kid=myKids.find(k=>k.id===selId)||myKids[0];
+  const pickKid=id=>{ setSelId(id); try{sessionStorage.setItem("startKid",id);}catch(e){} };
+  const save=async(ev,status)=>{
+    try{ await onSetRsvp(ev,kid.id,status,status&&status!=="yes"?(rsvps[rsvpKey(ev.key,kid.id)]?.note||""):""); }
+    catch(e){ console.warn("rsvp",e); toast&&toast("Nach dem Anmeldeschluss oder ohne Berechtigung nicht möglich – bitte den Trainer fragen","warn"); }
+  };
   const firstName=(currentUser?.displayName||currentUser?.email||"").split(/[ @]/)[0];
   const hour=new Date().getHours();
   const greeting=hour<11?"Guten Morgen":hour<18?"Hallo":"Guten Abend";
@@ -5696,12 +5722,24 @@ function ParentStartPage({role,currentUser,events,myKids,rsvps,openRsvps,onNavig
       <StartTeaser icon="🗓" title="Termine" sub={openRsvps>0?`${openRsvps} offen`:"Zu- und Absagen"} badge={openRsvps>0?openRsvps:null} onClick={()=>onNavigate("calendar")}/>
     </div>
 
-    <div style={{fontWeight:800,fontSize:15,color:C.text,marginBottom:10}}>Als Nächstes</div>
+    <div style={{fontWeight:800,fontSize:15,color:C.text,marginBottom:8}}>Als Nächstes</div>
+    {kid&&<div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+      {myKids.length>1
+        ?myKids.map(k=>{const on=k.id===kid.id;return <button key={k.id} onClick={()=>pickKid(k.id)} style={{padding:"6px 14px",borderRadius:20,border:`2px solid ${on?C.primary:C.border}`,background:on?C.accentL:C.card,color:on?C.primary:C.muted,fontWeight:800,fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>{role==="spieler"?"⚽":"👶"} {k.name}</button>;})
+        :<span style={{padding:"6px 14px",borderRadius:20,border:`2px solid ${C.primary}`,background:C.accentL,color:C.primary,fontWeight:800,fontSize:14}}>{role==="spieler"?"⚽":"👶"} {kid.name}</span>}
+    </div>}
     {next.length===0&&<div style={{...box,fontSize:14,color:C.muted}}>Aktuell sind keine Termine geplant.</div>}
-    {next.map(ev=><div key={ev.key} onClick={()=>onNavigate("calendar")} style={{...box,marginBottom:10,cursor:"pointer"}}>
-      <RsvpEventHead ev={ev}/>
-      {myKids.length>0&&<RsvpStatusPills kids={myKids} ev={ev} rsvps={rsvps}/>}
-    </div>)}
+    {next.map(ev=>{
+      const st=kid?(rsvps[rsvpKey(ev.key,kid.id)]?.status||null):null;
+      const dl=eventMeta?.[ev.key]?.deadlineMs||null, closed=!!dl&&now>dl;
+      return(<div key={ev.key} style={{...box,marginBottom:10,padding:"10px 12px"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div onClick={()=>onNavigate("calendar")} style={{flex:1,minWidth:0,cursor:"pointer"}}><RsvpEventHead ev={ev}/></div>
+          {kid&&<RsvpIconButtons st={st} locked={closed} onSet={status=>save(ev,status)}/>}
+        </div>
+        {kid&&dl&&<div style={{marginTop:6,fontSize:11,fontWeight:700,color:closed?"#b91c1c":"#92400e"}}>{closed?`🔒 Anmeldeschluss war ${fmtDeadline(dl)}`:`⏰ Zu-/Absage möglich bis ${fmtDeadline(dl)}`}</div>}
+      </div>);
+    })}
   </div>);
 }
 
@@ -6554,7 +6592,7 @@ export default function App() {
     <Nav page={page} setPage={setPage} onLogout={logout} counts={{exercises:exercises.length,players:players.filter(p=>p.active).length,sessions:sessions.length,tournaments:tournaments.length,teamsets:teamsets.length,openTodos:todos.filter(t=>!t.done).length||undefined,role,pendingCount:role==="admin"?groupJoinRequests.length:0,openRsvps}}/>
     <main className="gm" style={{display:"block",zoom:prefs.fontScale||1}}>
       {needsChildSetup?<ChildSetupPage role={role} players={rsvpPlayers} groupId={currentGroupId} toast={toast} onSkip={()=>{try{localStorage.setItem(`childSkip_${user.uid}_${currentGroupId}`,"1");}catch(e){} setChildSkip(true);}}/>:<>
-      {page==="start"&&isFamily(role)&&<ParentStartPage role={role} currentUser={user} events={rsvpEvents} myKids={myKids} rsvps={rsvps} openRsvps={openRsvps} onNavigate={setPage}/>}
+      {page==="start"&&isFamily(role)&&<ParentStartPage role={role} currentUser={user} events={rsvpEvents} myKids={myKids} rsvps={rsvps} eventMeta={eventMeta} openRsvps={openRsvps} onNavigate={setPage} onSetRsvp={setRsvp} toast={toast}/>}
       {page==="start"&&!isFamily(role)&&<StartPage players={players} coaches={coaches} sessions={sessions} tournaments={tournaments} todos={todos} meetings={meetings} teamsets={teamsets} kassenbuch={kassenbuch} exercises={exercises} role={role} openRsvps={openRsvps} currentUser={user} onlineUsers={onlineUsers} onNavigate={setPage} onOpenLibraryCategory={cat=>{setPendingLibraryCat(cat);setPage("library");}} onOpenOrgaItem={target=>{setPendingOrgaTarget(target);setPage("orga");}} onOpenCalendarItem={target=>{setPendingCalendarTarget(target);setPage("calendar");}} onOpenTournament={id=>{setPendingTurnierId(id);setPage("turnier");}} onSaveExercise={saveEx} onDeleteExercise={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="library"  &&<LibraryPage  exercises={exercises} onSave={saveEx} onDelete={id=>{const i=exercises.find(e=>e.id===id);setExercises(prev=>prev.filter(e=>e.id!==id));showUndo("Übung",i,()=>setExercises(prev=>[i,...prev]));}} apiKey={apiKey} toast={toast} onlineUsers={onlineUsers} currentUser={user} initialCategory={pendingLibraryCat} onConsumeInitialCategory={()=>setPendingLibraryCat(null)} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
       {page==="team"     &&<TeamPage     players={players} coaches={coaches} sessions={sessions} onSaveSession={saveSe} onSavePlayer={can(role,"editAnything")?savePl:null} onDeletePlayer={can(role,"editAnything")?id=>{const i=players.find(p=>p.id===id);setPlayers(prev=>prev.filter(p=>p.id!==id));showUndo("Spieler",i,()=>setPlayers(prev=>[i,...prev]));}:null} onSaveCoach={can(role,"editAnything")?saveCo:null} onDeleteCoach={can(role,"editAnything")?id=>{const i=coaches.find(c=>c.id===id);setCoaches(prev=>prev.filter(c=>c.id!==id));showUndo("Trainer",i,()=>setCoaches(prev=>[i,...prev]));}:null} toast={toast} showStrength={can(role,"seeStrength")} readOnly={!can(role,"editAnything")} onAddToTraining={can(role,"editAnything")?({playerIds,coachIds,kids,coachCount})=>{setPendingSetup({playerIds,coachIds,kids:kids||playerIds.length,coachCount:coachCount||1,date:todayISO(),location:"outdoor",focus:""});setPage("training");}:null} onlineUsers={onlineUsers} currentUser={user} onGoHome={()=>setPage("start")} onGoBack={pageHistory.length>0?goBack:null}/>}
